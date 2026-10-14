@@ -288,8 +288,21 @@ export class Renderer {
     for (let p = this.lo; p <= this.hi; p++) {
       if (isBlackKey(p)) continue;
       const r = this.keyRect(p)!;
-      ctx.fillStyle = keyColor.get(p) ?? COLORS.white;
+      const lit = keyColor.get(p);
+      ctx.fillStyle = lit ?? COLORS.white;
       ctx.fillRect(r.x, top, r.w, kh);
+      // Le rebord avant de la touche : bien visible au repos, presque effacé quand elle est enfoncée.
+      const lip = lit ? 2 : Math.max(3, kh * 0.035);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.13)';
+      ctx.fillRect(r.x, top + kh - lip, r.w, lip);
+      if (lit) {
+        // Enfoncée, la touche passe sous ses voisines : une ombre tombe sur son haut.
+        const sink = ctx.createLinearGradient(0, top, 0, top + kh * 0.16);
+        sink.addColorStop(0, 'rgba(0, 0, 0, 0.32)');
+        sink.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = sink;
+        ctx.fillRect(r.x, top, r.w, kh * 0.16);
+      }
       ctx.fillStyle = COLORS.whiteBorder;
       ctx.fillRect(r.x + r.w - 1, top, 1, kh);
       if (expected.has(p)) {
@@ -308,9 +321,31 @@ export class Renderer {
       if (!isBlackKey(p)) continue;
       const r = this.keyRect(p);
       if (!r) continue;
-      ctx.fillStyle = keyColor.get(p) ?? COLORS.black;
-      this.roundRect(r.x, top, r.w, blackH, 3);
+      const lit = keyColor.get(p);
+      // Enfoncée, une touche noire descend : elle paraît un peu plus courte et perd son rebord.
+      const h = lit ? blackH - 2 : blackH;
+      const bevel = lit ? 3 : Math.max(4, blackH * 0.08);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.18)'; // Son ombre sur les touches blanches.
+      ctx.fillRect(r.x + 2, top, r.w, h + 3);
+      ctx.fillStyle = lit ?? COLORS.black;
+      this.roundRect(r.x, top, r.w, h, 3);
       ctx.fill();
+      // Le dessus de la touche, un peu plus clair que son rebord avant.
+      const face = ctx.createLinearGradient(0, top, 0, top + h - bevel);
+      face.addColorStop(0, 'rgba(255, 255, 255, 0.04)');
+      face.addColorStop(1, 'rgba(255, 255, 255, 0.14)');
+      ctx.fillStyle = face;
+      this.roundRect(r.x + 1.5, top, r.w - 3, h - bevel, 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+      ctx.fillRect(r.x + 2, top + h - bevel, r.w - 4, 1);
+      if (lit) {
+        const sink = ctx.createLinearGradient(0, top, 0, top + kh * 0.1);
+        sink.addColorStop(0, 'rgba(0, 0, 0, 0.35)');
+        sink.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = sink;
+        ctx.fillRect(r.x, top, r.w, kh * 0.1);
+      }
       if (expected.has(p)) {
         this.drawExpected(r.x + 2, top + blackH * 0.55, r.w - 4, blackH * 0.4, pulse);
         const note = fingerOf.get(p);
