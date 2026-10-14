@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#11131a" />
+    <title>Piano</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="group song">
+        <select id="song-select" aria-label="Morceau"></select>
+        <button id="search-btn" class="btn primary" title="Chercher un morceau dans le catalogue">Chercher</button>
+        <button id="import-btn" class="btn" title="Ouvrir un ou plusieurs fichiers MIDI (.mid)">Importer…</button>
+        <button id="delete-btn" class="btn icon" title="Retirer ce morceau de la liste" hidden>✕</button>
+        <input id="file-input" type="file" accept=".mid,.midi,audio/midi" multiple hidden />
+      </div>
+
+      <div class="group" role="group" aria-label="Mode">
+        <button class="seg" data-mode="listen" title="L'app joue tout le morceau">Écouter</button>
+        <button class="seg" data-mode="wait" title="Le morceau attend que tu joues la bonne note">Attente</button>
+        <button class="seg" data-mode="flow" title="Le morceau avance au tempo, tes notes sont jugées">Rythme</button>
+      </div>
+
+      <div class="group" role="group" aria-label="Mains jouées par toi">
+        <button class="seg hand left" data-hand="left" title="Tu joues la main gauche">Main gauche</button>
+        <button class="seg hand right" data-hand="right" title="Tu joues la main droite">Main droite</button>
+      </div>
+
+      <div class="group transport">
+        <button id="restart-btn" class="btn icon" title="Revenir au début">⏮</button>
+        <button id="play-btn" class="btn icon primary" title="Lecture / pause (espace)">▶</button>
+        <span id="bar-label" class="muted"></span>
+      </div>
+
+      <div class="group speed">
+        <span class="label">Vitesse</span>
+        <button id="slower-btn" class="btn icon" title="Plus lent">−</button>
+        <input id="speed-range" type="range" min="0.2" max="1.5" step="0.05" aria-label="Vitesse" />
+        <button id="faster-btn" class="btn icon" title="Plus vite">+</button>
+        <span id="speed-label" class="value"></span>
+      </div>
+
+      <div class="group loop">
+        <label class="check"><input id="loop-check" type="checkbox" /> Boucle</label>
+        <span class="muted">mes.</span>
+        <input id="loop-from" type="number" min="1" inputmode="numeric" aria-label="Première mesure" />
+        <span class="muted">à</span>
+        <input id="loop-to" type="number" min="1" inputmode="numeric" aria-label="Dernière mesure" />
+      </div>
+
+      <div class="group options">
+        <select id="view-select" aria-label="Affichage">
+          <option value="notes">Notes qui tombent</option>
+          <option value="both">Partition + notes</option>
+          <option value="score">Partition en grand</option>
+        </select>
+        <label class="check"><input id="names-check" type="checkbox" /> Noms des notes</label>
+        <label class="check" title="Des mains posées sur le clavier qui jouent avec les doigtés"><input id="hands-check" type="checkbox" /> Mains</label>
+        <select id="fingers-select" aria-label="Doigtés">
+          <option value="all">Doigtés : écrits + calculés</option>
+          <option value="written">Doigtés : écrits seulement</option>
+          <option value="none">Sans doigtés</option>
+        </select>
+        <select id="sound-select" aria-label="Son de l'app">
+          <option value="browser">Son : appareil</option>
+          <option value="piano">Son : piano</option>
+        </select>
+        <button id="midi-status" class="pill" title="Connexion du piano"></button>
+      </div>
+    </header>
+
+    <div id="timeline" class="timeline" title="Cliquer pour aller à une mesure">
+      <div id="timeline-loop" class="timeline-loop"></div>
+      <div id="timeline-progress" class="timeline-progress"></div>
+    </div>
+
+    <main id="stage" class="stage">
+      <section id="score-panel" class="score-panel" aria-label="Partition">
+        <div id="score-message" class="score-message" hidden></div>
+        <div id="score" class="score"></div>
+      </section>
+      <div class="canvas-wrap">
+        <canvas id="canvas"></canvas>
+        <div class="overlay top-left">
+          <div id="song-title" class="title"></div>
+          <div id="song-info" class="muted small song-info"></div>
+        </div>
+        <div id="stats" class="overlay top-right stats"></div>
+        <div id="hint" class="overlay center hint"></div>
+        <div id="toast" class="toast" hidden></div>
+      </div>
+    </main>
+
+    <dialog id="search-dialog" class="search-dialog">
+      <form method="dialog" class="search-head">
+        <input id="search-input" type="search" placeholder="Titre, compositeur… (ex. « bach menuet »)" autocomplete="off" />
+        <select id="search-level" aria-label="Niveau">
+          <option value="all">Tous niveaux</option>
+          <option value="1">Niveau 1</option>
+          <option value="1-2">Niveaux 1 et 2</option>
+          <option value="1-3">Niveaux 1 à 3</option>
+          <option value="4-5">Niveaux 4 et 5</option>
+        </select>
+        <select id="search-source" aria-label="Source">
+          <option value="all">Toutes les sources</option>
+          <option value="pdmx">MuseScore (arrangements)</option>
+          <option value="mutopia">Mutopia (classique)</option>
+        </select>
+        <label class="check"><input id="search-beginner" type="checkbox" /> Débutant selon l'auteur</label>
+        <label class="check"><input id="search-fingers" type="checkbox" /> Avec doigtés</label>
+        <label class="check"><input id="search-separate" type="checkbox" /> Mains séparées seulement</label>
+        <button class="btn icon search-close" title="Fermer">✕</button>
+      </form>
+      <div id="search-count" class="muted small search-count"></div>
+      <ul id="search-results" class="results"></ul>
+      <p class="muted small search-foot">
+        Pièces du <a href="https://www.mutopiaproject.org/" target="_blank" rel="noopener">Mutopia Project</a>
+        et de <a href="https://zenodo.org/records/15571083" target="_blank" rel="noopener">PDMX</a> (partitions
+        MuseScore placées dans le domaine public par leurs auteurs ; jeu de données CC BY 4.0, Long et al., 2024). Le niveau situe chaque pièce par rapport aux autres, d'après la
+        vitesse de jeu, les touches noires et les déplacements de la main : c'est un ordre de grandeur.
+        « Mains estimées » : le fichier n'a qu'une piste, l'app devine les mains.
+      </p>
+    </dialog>
+
+    <dialog id="midi-help">
+      <h2>Connecter le piano</h2>
+      <div id="midi-help-body"></div>
+      <h3>Sans piano</h3>
+      <p>
+        Touche ou clique les touches à l'écran. Sur ordinateur, la rangée du milieu du clavier joue les
+        touches blanches à partir de <kbd>Q</kbd>, celle du dessus les noires. <kbd>W</kbd> et <kbd>X</kbd>
+        changent d'octave, <kbd>Espace</kbd> lance ou met en pause (touches d'un clavier AZERTY).
+      </p>
+      <form method="dialog"><button class="btn primary">Fermer</button></form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
