@@ -1,7 +1,8 @@
 import type { Judgement, Player } from '../engine/player';
 import { frenchName, frenchOctave, isBlackKey } from '../song/pitch';
-import type { FingerDisplay } from '../storage';
-import { GhostHands, type KeyboardGeometry } from './ghost-hands';
+import { noteGroups, type NoteGroup } from '../song/chords';
+import type { ChordDisplay, FingerDisplay } from '../storage';
+import { GhostHands, type HandsOverlay, type KeyboardGeometry } from './ghost-hands';
 import type { Hand, Note, Song } from '../song/types';
 
 /** Secondes de morceau visibles au-dessus du clavier. */
@@ -30,6 +31,9 @@ const COLORS = {
   fingerText: '#11131a',
   autoFingerDisc: '#d9e5f7',
   autoFingerText: '#1d3557',
+  together: 'rgba(255, 224, 138, 0.9)',
+  chordLabel: '#ffe08a',
+  chordLabelBg: 'rgba(17, 19, 26, 0.88)',
 };
 
 /** Faut-il afficher le doigté de cette note ? */
@@ -46,6 +50,8 @@ export interface RenderState {
   fingers: FingerDisplay;
   /** Mains fantômes posées sur le clavier. */
   ghostHands: boolean;
+  /** Notes à jouer ensemble : reliées par un trait, avec le nom de l'accord s'il est évident. */
+  chords: ChordDisplay;
 }
 
 export class Renderer {
@@ -59,6 +65,7 @@ export class Renderer {
   /** Place réservée sous le clavier aux paumes et aux poignets des mains fantômes. */
   private handZone = 0;
   private whiteCount = 0;
+  private groups = new WeakMap<Song, NoteGroup[]>();
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
@@ -89,6 +96,12 @@ export class Renderer {
     let i = 0;
     for (let p = lo; p <= hi; p++) if (!isBlackKey(p)) this.whiteIndex.set(p, i++);
     this.whiteCount = i;
+  }
+
+  /** Les mains dessinées en 3D par-dessus le canevas, ou `null` pour revenir au dessin 2D. */
+  setHandsOverlay(overlay: HandsOverlay | null): void {
+    if (this.ghost.overlay !== overlay) this.ghost.overlay?.clear();
+    this.ghost.overlay = overlay;
   }
 
   resize(): void {
@@ -179,6 +192,8 @@ export class Renderer {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
       ctx.fillRect(0, front, this.width, 2);
       this.ghost.draw(ctx, this.geometry(), state.player);
+    } else {
+      this.ghost.overlay?.clear();
     }
   }
 
@@ -273,8 +288,69 @@ export class Renderer {
         }
       }
     }
+    if (state.chords !== 'none') this.drawGroups(state, top, pps, windowEnd);
     ctx.restore();
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Les notes à jouer ensemble : un trait relie le bas de leurs rectangles, d'une main à l'autre,
+   * avec un point sur chacune. Le nom de l'accord, quand il est évident, se pose à côté.
+   */
+  private drawGroups(state: RenderState, top: number, pps: number, windowEnd: number): void {
+    const { ctx } = this;
+    const { player } = state;
+    let groups = this.groups.get(player.song);
+    if (!groups) {
+      groups = noteGroups(player.song);
+      this.groups.set(player.song, groups);
+    }
+    for (const group of groups) {
+      if (group.start > windowEnd) break;
+      if (group.start < player.time - 0.05) continue;
+      const rects = group.notes.map((n) => this.keyRect(n.pitch)).filter((r) => r !== null);
+      if (rects.length < 2) continue;
+      const centers = rects.map((r) => r.x + r.w / 2);
+      const y = top - (group.start - player.time) * pps + 2;
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = COLORS.together;
+      ctx.fillStyle = COLORS.together;
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(Math.min(...centers), y);
+      ctx.lineTo(Math.max(...centers), y);
+      ctx.stroke();
+      for (const x of centers) {
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      if (state.chords === 'names' && group.chord) {
+        this.drawChordName(group.chord, Math.min(...rects.map((r) => r.x)), Math.max(...rects.map((r) => r.x + r.w)), y);
+      }
+    }
+  }
+
+  /** Une étiquette à gauche du groupe, ou à droite s'il touche le bord de l'écran. */
+  private drawChordName(name: string, left: number, right: number, y: number): void {
+    const { ctx } = this;
+    ctx.font = '600 12px system-ui, sans-serif';
+    const width = ctx.measureText(name).width + 12;
+    const height = 18;
+    const x = left - width - 6 >= 2 ? left - width - 6 : right + 6;
+    ctx.fillStyle = COLORS.chordLabelBg;
+    this.roundRect(x, y - height, width, height, 6);
+    ctx.fill();
+    ctx.strokeStyle = COLORS.together;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = COLORS.chordLabel;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name, x + width / 2, y - height / 2 + 0.5);
+    ctx.textBaseline = 'bottom';
   }
 
   private drawKeyboard(state: RenderState): void {
@@ -288,7 +364,7 @@ export class Renderer {
     const keyColor = new Map<number, string>();
     for (const note of player.song.notes) {
       if (note.start > player.time) break;
-      if (note.start + note.duration <= player.time) continue;
+      if (player.releaseTime(note) <= player.time) continue;
       // En attente, les notes de l'app prévues à cet instant ne sonnent pas encore.
       if (player.waiting && note.start >= player.time - 1e-9) continue;
       if (player.isUserNote(note) || !player.isActive(note)) continue;

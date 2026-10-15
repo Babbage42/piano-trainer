@@ -28,6 +28,8 @@ export interface Song {
   duration: number;
   /** Début de chaque mesure, en secondes. bars[0] vaut 0. */
   bars: number[];
+  /** Début de chaque temps, en secondes, pour le métronome. Absent : quatre temps égaux par mesure. */
+  beats?: number[];
   /** Comment les mains ont été attribuées. */
   hands: HandsMethod;
   /** Convertit une position en noires (depuis le début) en secondes, d'après le tempo du fichier. */

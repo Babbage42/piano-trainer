@@ -34,7 +34,14 @@ export class Sampler implements Scheduler {
       this.output.connect(compressor);
       this.loading = this.loadSamples();
     }
-    if (this.ctx.state === 'suspended') void this.ctx.resume();
+    if (this.ctx.state !== 'running') {
+      void this.ctx.resume();
+      // Sur iPhone, jouer un son, même muet, pendant le geste finit de débloquer l'audio.
+      const silence = this.ctx.createBufferSource();
+      silence.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
+      silence.connect(this.ctx.destination);
+      silence.start();
+    }
   }
 
   /** Faux tant que l'utilisateur n'a pas encore cliqué ou tapé dans la page. */
@@ -45,6 +52,26 @@ export class Sampler implements Scheduler {
   setVolume(volume: number): void {
     this.volume = volume;
     if (this.output) this.output.gain.value = volume;
+  }
+
+  /** Un clic de métronome, bref et sec ; plus aigu et plus fort sur le premier temps de la mesure. */
+  click(delay: number, accent: boolean): void {
+    if (!this.ctx || !this.output) return;
+    const ctx = this.ctx;
+    const at = ctx.currentTime + delay + 0.01;
+    const source = ctx.createOscillator();
+    source.type = 'triangle';
+    source.frequency.value = accent ? 1760 : 1320;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(accent ? 0.9 : 0.55, at + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.001, at + 0.06);
+    source.connect(gain).connect(this.output);
+    source.start(at);
+    source.stop(at + 0.07);
+    const voice = { source, gain };
+    this.voices.add(voice);
+    source.onended = () => this.voices.delete(voice);
   }
 
   schedule(note: Note, delay: number, duration: number): void {

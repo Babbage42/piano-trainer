@@ -16,7 +16,7 @@ export interface KeyboardGeometry {
 }
 
 /** Ce que les mains ont besoin de savoir du morceau en cours. */
-export type HandsPlayer = Pick<Player, 'song' | 'time' | 'mode' | 'userHands'>;
+export type HandsPlayer = Pick<Player, 'song' | 'time' | 'mode' | 'userHands' | 'releaseTime'>;
 
 /** Une main se prépare à jouer les notes qui arrivent dans ce délai (secondes de morceau). */
 const LOOKAHEAD = 0.35;
@@ -97,6 +97,15 @@ interface Point {
 interface FingerState extends Point {
   pressed: boolean;
   upcoming: boolean;
+  /** Le doigt a une touche à jouer (sinon il suit la main). */
+  active: boolean;
+  black: boolean;
+}
+
+/** Un autre dessin des mains (la 3D à l'essai), qui reçoit leur état à chaque image. */
+export interface HandsOverlay {
+  render(geo: KeyboardGeometry, hands: Record<Hand, { anchor: number; turn: number; alpha: number; fingers: FingerState[] } | null>): void;
+  clear(): void;
 }
 
 interface HandState {
@@ -116,6 +125,7 @@ export class GhostHands {
   private hands: Record<Hand, HandState> = { right: emptyHand(), left: emptyHand() };
   private last = performance.now();
   private songKey: unknown = null;
+  overlay: HandsOverlay | null = null;
 
   draw(ctx: CanvasRenderingContext2D, geo: KeyboardGeometry, player: HandsPlayer): void {
     const now = performance.now();
@@ -130,15 +140,19 @@ export class GhostHands {
     ctx.beginPath();
     ctx.rect(0, geo.keyboardTop, 1e5, geo.bottom - geo.keyboardTop);
     ctx.clip();
+    const overlay: Parameters<HandsOverlay['render']>[1] = { left: null, right: null };
     for (const hand of ['left', 'right'] as Hand[]) {
       this.update(hand, geo, player, dt);
       const state = this.hands[hand];
       if (state.anchor === null) continue;
       // En mode jeu, la main que joue l'app reste discrète : c'est l'autre qu'on apprend.
       const faded = player.mode !== 'listen' && !player.userHands.has(hand);
-      this.drawHand(ctx, geo, hand, state, faded ? 0.32 : 0.96);
+      const alpha = faded ? 0.32 : 0.96;
+      if (this.overlay) overlay[hand] = { anchor: state.anchor, turn: state.turn, alpha: faded ? 0.4 : 1, fingers: state.fingers };
+      else this.drawHand(ctx, geo, hand, state, alpha);
     }
     ctx.restore();
+    this.overlay?.render(geo, overlay);
   }
 
   private update(hand: Hand, geo: KeyboardGeometry, player: HandsPlayer, dt: number): void {
@@ -192,7 +206,7 @@ export class GhostHands {
     state.fingers.forEach((finger, i) => {
       const note = assigned[i];
       const key = note && geo.keyCenter(note.pitch);
-      const pressed = !!note && note.start <= t && t < note.start + note.duration * 0.92;
+      const pressed = !!note && note.start <= t && t < player.releaseTime(note);
       // Profondeur du bout du doigt derrière le bord avant des touches blanches (mm).
       const natural = i === 0 ? THUMB_TIP_DEPTH : KNUCKLE_DEPTH - MCP[i].y + VISIBLE[i];
       let depth = natural;
@@ -216,6 +230,8 @@ export class GhostHands {
       finger.y += (ty - finger.y) * k;
       finger.pressed = pressed;
       finger.upcoming = !!note && !pressed && note.start > t;
+      finger.active = !!key;
+      finger.black = !!key?.black;
     });
   }
 
@@ -529,5 +545,5 @@ function unit(a: Point, b: Point): Point {
 }
 
 function emptyHand(): HandState {
-  return { anchor: null, turn: 0, fingers: Array.from({ length: 5 }, () => ({ x: 0, y: 0, pressed: false, upcoming: false })) };
+  return { anchor: null, turn: 0, fingers: Array.from({ length: 5 }, () => ({ x: 0, y: 0, pressed: false, upcoming: false, active: false, black: false })) };
 }

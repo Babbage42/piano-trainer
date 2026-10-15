@@ -81,6 +81,7 @@ export function songFromNotation(def: NotationSong): Song {
   const bars: number[] = [];
   for (let t = 0; t < end - 1e-6; t += barLength) bars.push(t);
   const song = buildSong(def.title, notes, bars, 'separate');
+  song.beats = bars.flatMap((bar) => Array.from({ length: def.beatsPerBar }, (_, k) => bar + k * secondsPerBeat));
   song.quarterToSeconds = (quarters) => quarters * secondsPerBeat;
   return song;
 }

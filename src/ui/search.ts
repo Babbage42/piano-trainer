@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core';
 import type { HandsMethod } from '../song/types';
 import type { Level } from '../song/difficulty';
 
@@ -107,7 +108,8 @@ export function fromMutopia(p: MutopiaEntry): CatalogPiece {
     title: p.title,
     composer: p.composer,
     detail: [p.opus, p.style].filter(Boolean).join(' · '),
-    file: `/mutopia/${p.mid}`,
+    // Le serveur de dev relaie Mutopia (CORS) ; l'app iPhone y va directement, par le réseau natif.
+    file: Capacitor.isNativePlatform() ? `${MUTOPIA_BASE}${p.mid}` : `/mutopia/${p.mid}`,
     page: `${MUTOPIA_BASE}cgibin/piece-info.cgi?id=${p.id}`,
     pdf: p.pdf ? `${MUTOPIA_BASE}${p.pdf}` : undefined,
     fingering: 0,
@@ -283,6 +285,13 @@ export class SearchPanel {
 
   constructor(private host: SearchHost) {
     this.input.addEventListener('input', () => this.render());
+    // « Rechercher » sur le clavier de l'iPhone le range, pour voir les résultats.
+    this.input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this.input.blur();
+      }
+    });
     for (const control of [this.level, this.source, this.separate, this.beginner, this.fingers]) {
       control.addEventListener('change', () => this.render());
     }
@@ -291,7 +300,9 @@ export class SearchPanel {
 
   async open(): Promise<void> {
     this.dialog.showModal();
-    this.input.focus();
+    // Au doigt, pas de clavier qui surgit et cache la moitié de l'écran : on le demande en touchant le champ.
+    if (!matchMedia('(pointer: coarse)').matches) this.input.focus();
+    else this.input.blur();
     if (!this.index) {
       this.count.textContent = 'Chargement du catalogue…';
       this.index = indexCatalog(await this.loadCatalogs());

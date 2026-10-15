@@ -5,17 +5,26 @@ import type { Hand } from './song/types';
 // (navigation privée, par exemple), l'app marche quand même, sans mémoire.
 
 export type FingerDisplay = 'all' | 'written' | 'none';
+/** Notes à jouer ensemble : repère et nom d'accord, repère seul, ou rien. */
+export type ChordDisplay = 'names' | 'marks' | 'none';
 
 export interface Settings {
   songId: string;
   mode: Mode;
   hands: Hand[];
   speed: number;
+  /** Clic à chaque temps, avec une mesure de décompte. */
+  metronome: boolean;
+  /** Coupe les notes jouées par l'app (le métronome a son propre bouton). */
+  muted: boolean;
   showNoteNames: boolean;
   /** Doigtés affichés : écrits et calculés, écrits seulement, ou aucun. */
   fingers: FingerDisplay;
   /** Mains fantômes posées sur le clavier. */
   ghostHands: boolean;
+  chords: ChordDisplay;
+  /** Dessin des mains : illustration 2D, ou modèle 3D (plus lourd, sans numéros de doigts). */
+  handsStyle: '2d' | '3d';
   view: 'notes' | 'both' | 'score';
   sound: 'browser' | 'piano';
 }
@@ -27,9 +36,13 @@ export const DEFAULT_SETTINGS: Settings = {
   mode: 'listen',
   hands: ['right'],
   speed: 1,
+  metronome: false,
+  muted: false,
   showNoteNames: true,
   fingers: 'all',
   ghostHands: true,
+  chords: 'names',
+  handsStyle: '2d',
   view: 'both',
   sound: 'browser',
 };

@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { LEAD_IN, Player, type Scheduler } from '../src/engine/player';
+import { LEAD_IN, Player, worstBars, type Scheduler } from '../src/engine/player';
 import { songFromNotation } from '../src/song/notation';
 import type { Note } from '../src/song/types';
 
 class FakeScheduler implements Scheduler {
   played: Array<{ pitch: number; at: number }> = [];
+  clicks: Array<{ at: number; accent: boolean }> = [];
   clock = 0;
   schedule(note: Note, delay: number): void {
     this.played.push({ pitch: note.pitch, at: this.clock + delay });
+  }
+  click(delay: number, accent: boolean): void {
+    // Au dixième près : le tout premier clic part une image après l'appui sur lecture.
+    this.clicks.push({ at: Math.round((this.clock + delay) * 10) / 10, accent });
   }
   cancelAll(): void {}
 }
@@ -45,6 +50,117 @@ describe('mode écoute', () => {
     run(p, s, LEAD_IN * 2 + 2.5);
     const d = s.played.find((x) => x.pitch === 62)!;
     expect(d.at).toBeCloseTo(LEAD_IN * 2 + 2, 1);
+  });
+});
+
+describe('touches à l’écran', () => {
+  it('remontent entre deux notes répétées, même jouées vite', () => {
+    const p = new Player(songFromNotation({ title: 't', bpm: 240, beatsPerBar: 4, right: 'C4:0.5 C4:0.5 C4:0.5', left: '' }), new FakeScheduler());
+    const [first, second] = p.song.notes;
+    // Notes de 1/8 s presque collées : la touche reste levée au moins trois images avant d'être refrappée.
+    const gap = () => (second.start - p.releaseTime(first)) / p.speed;
+    expect(gap()).toBeGreaterThan(0.05);
+    p.setSpeed(0.5);
+    expect(gap()).toBeGreaterThan(0.05);
+  });
+
+  it('restent enfoncées presque toute une note longue', () => {
+    const p = new Player(song(), new FakeScheduler());
+    const note = p.song.notes[0];
+    expect(note.start + note.duration - p.releaseTime(note)).toBeCloseTo(0.07);
+  });
+});
+
+describe('métronome', () => {
+  it('compte une mesure avant de partir, puis bat chaque temps, le premier plus fort', () => {
+    const s = new FakeScheduler();
+    const p = new Player(song(), s);
+    p.setMetronome(true);
+    p.restart();
+    p.play();
+    run(p, s, 4 + 2.5);
+    // 60 bpm en 4/4 : un décompte de 4 temps, puis les temps du morceau.
+    expect(s.clicks.map((c) => c.at)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(s.clicks.map((c) => c.accent)).toEqual([true, false, false, false, true, false, false]);
+  });
+
+  it('suit la vitesse', () => {
+    const s = new FakeScheduler();
+    const p = new Player(song(), s);
+    p.setMetronome(true);
+    p.setSpeed(0.5);
+    p.restart();
+    p.play();
+    run(p, s, 5);
+    expect(s.clicks.map((c) => c.at)).toEqual([0, 2, 4]);
+  });
+
+  it("se tait en mode attente tant que la note n'est pas jouée", () => {
+    const s = new FakeScheduler();
+    const p = new Player(song(), s);
+    p.setMetronome(true);
+    p.setMode('wait');
+    p.restart();
+    p.play();
+    run(p, s, 4 + 3);
+    // Le décompte, le premier temps, puis plus rien : le morceau attend le do.
+    expect(s.clicks.map((c) => c.at)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('ne bat pas le temps de fin de la boucle, qui repart avec son décompte', () => {
+    const s = new FakeScheduler();
+    const p = new Player(song(), s);
+    p.setMetronome(true);
+    p.setLoop({ start: 0, end: 2 });
+    p.restart();
+    p.play();
+    run(p, s, 4 + 2 + 0.5);
+    expect(s.clicks.map((c) => c.at)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+});
+
+describe('erreurs par mesure', () => {
+  // Deux mesures de quatre noires à la main droite.
+  const twoBars = () =>
+    songFromNotation({ title: 't', bpm: 60, beatsPerBar: 4, right: 'C4 D4 E4 F4 G4 A4 B4 C5', left: '' });
+
+  it('range chaque fausse note dans la mesure de la note attendue', () => {
+    const s = new FakeScheduler();
+    const p = new Player(twoBars(), s);
+    p.setMode('wait');
+    p.play();
+    run(p, s, LEAD_IN + 0.1);
+    expect(p.errorsByBar).toEqual([0, null]);
+    p.noteOn(61);
+    p.noteOn(60);
+    for (const pitch of [62, 64, 65]) {
+      run(p, s, 1);
+      p.noteOn(pitch);
+    }
+    run(p, s, 1);
+    p.noteOn(70);
+    p.noteOn(71);
+    expect(p.errorsByBar).toEqual([1, 2]);
+  });
+
+  it('compte les notes ratées en mode rythme, et oublie celles du passage précédent', () => {
+    const s = new FakeScheduler();
+    const p = new Player(twoBars(), s);
+    p.setMode('flow');
+    p.setLoop({ start: 0, end: 8 });
+    p.play();
+    run(p, s, LEAD_IN + 8.1);
+    // Rien joué : les huit notes sont ratées, puis la boucle repart.
+    expect(p.errorsByBar).toEqual([4, 4]);
+    run(p, s, LEAD_IN + 0.1);
+    expect(p.errorsByBar).toEqual([0, 4]);
+  });
+
+  it('choisit les deux mesures les plus fautives, avec celle qui mène à une faute isolée', () => {
+    expect(worstBars([0, 0, 3, 0, 1, 1])).toEqual({ first: 1, last: 2 });
+    expect(worstBars([0, 2, 2, 0, 3, null])).toEqual({ first: 1, last: 2 });
+    expect(worstBars([0, null, 0])).toBeNull();
+    expect(worstBars([5])).toEqual({ first: 0, last: 0 });
   });
 });
 

@@ -1,4 +1,4 @@
-import type { Hand, Note, Song } from '../song/types';
+import { barIndexAt, barStart, type Hand, type Note, type Song } from '../song/types';
 
 /**
  * listen : l'app joue tout, on regarde (simulation complète).
@@ -22,6 +22,18 @@ export interface Scheduler {
   schedule(note: Note, delay: number, duration: number): void;
   /** Coupe tout ce qui sonne et tout ce qui est programmé. */
   cancelAll(): void;
+  /** Un clic de métronome dans `delay` secondes réelles, accentué sur le premier temps. */
+  click?(delay: number, accent: boolean): void;
+}
+
+/** Les temps du morceau : leurs instants, et lesquels ouvrent une mesure. */
+interface BeatGrid {
+  times: number[];
+  downbeat: boolean[];
+  /** Avant le début du morceau (décompte), les temps continuent à cet intervalle… */
+  step: number;
+  /** … groupés par mesures de ce nombre de temps. */
+  perBar: number;
 }
 
 interface Group {
@@ -41,6 +53,12 @@ const EARLY_WINDOW = 0.5;
 export const FLOW_TOLERANCE = 0.2;
 /** Le morceau s'arrête un peu après la dernière note. */
 const TAIL = 0.5;
+/**
+ * À l'écran, une touche remonte un peu avant la fin de sa note (secondes réelles) : une note
+ * répétée vite se voit ainsi frappée plusieurs fois, au lieu d'une touche restée enfoncée.
+ * 70 ms, c'est environ quatre images.
+ */
+const KEY_RELEASE = 0.07;
 
 const emptyStats = (): Stats => ({ hit: 0, missed: 0, wrong: 0 });
 
@@ -52,6 +70,8 @@ export class Player {
   mode: Mode = 'listen';
   userHands = new Set<Hand>(['right']);
   speed = 1;
+  /** Le métronome bat les temps pendant la lecture, et une mesure de décompte avant de partir. */
+  metronome = false;
   loop: { start: number; end: number } | null = null;
   status: NoteStatus[] = [];
   /** Statistiques du passage en cours. */
@@ -60,6 +80,13 @@ export class Player {
   lastPass: Stats | null = null;
   /** Vrai quand le mode attente bloque le temps sur des notes pas encore jouées. */
   waiting = false;
+  /**
+   * Erreurs (fausses notes, notes ratées) de chaque mesure lors de son dernier passage en mode
+   * Attente ou Rythme ; null tant qu'elle n'a pas été jouée. Une mesure rejouée repart de zéro.
+   */
+  errorsByBar: Array<number | null> = [];
+  /** Change à chaque erreur ou passage : la frise ne se redessine que dans ce cas. */
+  errorsVersion = 0;
   onPassEnd: ((stats: Stats) => void) | null = null;
 
   /** Sans boucle, les notes avant cet instant ne sont ni jouées par l'app ni jugées. */
@@ -68,9 +95,15 @@ export class Player {
   private nextGroup = 0;
   private nextToSchedule = 0;
   private missCursor = 0;
+  private grid: BeatGrid = { times: [0], downbeat: [true], step: 0.5, perBar: 4 };
+  /** Prochain temps à programmer ; négatif pendant le décompte du début. */
+  private nextBeat = 0;
+  private currentBar = -1;
 
   constructor(song: Song, private scheduler: Scheduler) {
     this.song = song;
+    this.grid = beatGrid(song);
+    this.errorsByBar = song.bars.map(() => null);
     this.reset(-LEAD_IN);
   }
 
@@ -78,10 +111,13 @@ export class Player {
 
   setSong(song: Song): void {
     this.song = song;
+    this.grid = beatGrid(song);
+    this.errorsByBar = song.bars.map(() => null);
+    this.errorsVersion++;
     this.loop = null;
     this.playing = false;
     this.activeFrom = 0;
-    this.reset(-LEAD_IN);
+    this.reset(-this.leadIn(0));
   }
 
   setMode(mode: Mode): void {
@@ -94,17 +130,27 @@ export class Player {
     this.reset(this.time);
   }
 
+  /** Temps du morceau où la touche de cette note remonte à l'écran (avant la fin du son). */
+  releaseTime(note: Note): number {
+    return note.start + note.duration - Math.min(note.duration * 0.4, KEY_RELEASE * this.speed);
+  }
+
   setSpeed(speed: number): void {
     this.speed = speed;
-    this.scheduler.cancelAll();
-    this.nextToSchedule = this.lowerBound(this.time);
+    this.rescheduleFromNow();
+  }
+
+  setMetronome(on: boolean): void {
+    this.metronome = on;
+    this.rescheduleFromNow();
   }
 
   setLoop(loop: { start: number; end: number } | null): void {
     this.loop = loop && loop.end > loop.start ? loop : null;
     this.activeFrom = 0;
-    const outside = this.loop && (this.time < this.loop.start - LEAD_IN || this.time >= this.loop.end);
-    this.reset(outside && this.loop ? this.loop.start - LEAD_IN : this.time);
+    const lead = this.loop ? this.leadIn(this.loop.start) : 0;
+    const outside = this.loop && (this.time < this.loop.start - lead || this.time >= this.loop.end);
+    this.reset(outside && this.loop ? this.loop.start - lead : this.time);
   }
 
   // --- Transport --------------------------------------------------------------
@@ -117,20 +163,20 @@ export class Player {
   pause(): void {
     this.playing = false;
     this.waiting = false;
-    this.scheduler.cancelAll();
-    this.nextToSchedule = this.lowerBound(this.time);
+    this.rescheduleFromNow();
   }
 
   /** Revient au début du morceau, ou de la boucle. */
   restart(): void {
     this.activeFrom = 0;
-    this.reset((this.loop?.start ?? 0) - LEAD_IN);
+    const start = this.loop?.start ?? 0;
+    this.reset(start - this.leadIn(start));
   }
 
   /** Repart de l'instant `time` (le début d'une mesure), avec un décompte avant. */
   startFrom(time: number): void {
     this.activeFrom = time;
-    this.reset(time - LEAD_IN);
+    this.reset(time - this.leadIn(time));
   }
 
   /** Avance le morceau de `dt` secondes réelles. Appelé à chaque image. */
@@ -151,6 +197,7 @@ export class Player {
     }
 
     this.time = target;
+    this.enterBar();
     if (this.mode === 'flow') this.markMissed();
     this.scheduleAhead();
 
@@ -201,6 +248,7 @@ export class Player {
     const id = group.noteIds.find((i) => this.song.notes[i].pitch === pitch && this.status[i] === 'pending');
     if (id === undefined) {
       this.stats.wrong++;
+      this.addError(group.time);
       return 'wrong';
     }
     // Bonne note, mais jouée bien trop tôt : on l'ignore sans la compter fausse.
@@ -226,6 +274,7 @@ export class Player {
     }
     if (!best) {
       this.stats.wrong++;
+      this.addError(this.time);
       return 'wrong';
     }
     this.status[best.id] = 'hit';
@@ -242,6 +291,7 @@ export class Player {
       if (this.status[note.id] === 'pending' && this.isUserNote(note) && this.isActive(note)) {
         this.status[note.id] = 'missed';
         this.stats.missed++;
+        this.addError(note.start);
       }
       this.missCursor++;
     }
@@ -263,6 +313,74 @@ export class Player {
       }
       this.nextToSchedule++;
     }
+
+    if (!this.metronome || !this.scheduler.click) return;
+    // En mode attente, le temps de la note attendue bat quand même : c'est le signal pour la jouer.
+    const beatHorizon = group ? horizon + 1e-6 : horizon;
+    for (let t = this.beatTime(this.nextBeat); t < beatHorizon; t = this.beatTime(++this.nextBeat)) {
+      // La boucle repart avant son dernier temps : il serait de trop.
+      if (this.loop && t >= this.loop.end - 1e-6) break;
+      this.scheduler.click(Math.max(0, (t - this.time) / this.speed), this.isDownbeat(this.nextBeat));
+    }
+  }
+
+  /** En entrant dans une mesure de la partie travaillée, on oublie ses erreurs du passage précédent. */
+  private enterBar(): void {
+    if (this.mode === 'listen' || this.time < 0) return;
+    const bar = barIndexAt(this.song, this.time);
+    if (bar === this.currentBar) return;
+    this.currentBar = bar;
+    const from = this.loop?.start ?? this.activeFrom;
+    if (barStart(this.song, bar) < from - 1e-6) return;
+    this.errorsByBar[bar] = 0;
+    this.errorsVersion++;
+  }
+
+  private addError(t: number): void {
+    const bar = barIndexAt(this.song, Math.max(0, t));
+    this.errorsByBar[bar] = (this.errorsByBar[bar] ?? 0) + 1;
+    this.errorsVersion++;
+  }
+
+  /** Décompte avant `at` : 1,5 s, ou avec le métronome une mesure entière (deux si elle est très courte). */
+  private leadIn(at: number): number {
+    if (!this.metronome) return LEAD_IN;
+    const bar = Math.max(0, barIndexAt(this.song, at) - 1);
+    const length = at > 0 ? at - barStart(this.song, bar) : this.grid.step * this.grid.perBar;
+    if (length <= 0) return LEAD_IN;
+    return length * Math.max(1, Math.ceil(LEAD_IN / length - 1e-6));
+  }
+
+  /** Instant du temps k ; les k négatifs sont les temps du décompte, avant le début du morceau. */
+  private beatTime(k: number): number {
+    if (k < 0) return k * this.grid.step;
+    return k < this.grid.times.length ? this.grid.times[k] : Infinity;
+  }
+
+  private isDownbeat(k: number): boolean {
+    if (k < 0) return (((k % this.grid.perBar) + this.grid.perBar) % this.grid.perBar) === 0;
+    return this.grid.downbeat[k] ?? false;
+  }
+
+  /** Premier temps à partir de l'instant t. */
+  private firstBeatFrom(t: number): number {
+    if (t < 0) return Math.ceil(t / this.grid.step - 1e-9);
+    const { times } = this.grid;
+    let lo = 0;
+    let hi = times.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (times[mid] < t - 1e-9) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /** Oublie ce qui était programmé et reprend la programmation à partir de maintenant. */
+  private rescheduleFromNow(): void {
+    this.scheduler.cancelAll();
+    this.nextToSchedule = this.lowerBound(this.time);
+    this.nextBeat = this.firstBeatFrom(this.time);
   }
 
   private endPass(): void {
@@ -272,6 +390,7 @@ export class Player {
         if (this.status[note.id] === 'pending' && this.isUserNote(note) && this.isActive(note)) {
           this.status[note.id] = 'missed';
           this.stats.missed++;
+          this.addError(note.start);
         }
       });
     }
@@ -287,6 +406,8 @@ export class Player {
     this.status = this.song.notes.map(() => 'pending');
     this.stats = emptyStats();
     this.nextToSchedule = this.lowerBound(time);
+    this.nextBeat = this.firstBeatFrom(time);
+    this.currentBar = -1;
     this.missCursor = this.nextToSchedule;
     this.groups = this.buildGroups();
     this.nextGroup = this.groups.findIndex((g) => g.time >= time - 1e-6);
@@ -316,4 +437,42 @@ export class Player {
     }
     return lo;
   }
+}
+
+/** Les temps du morceau, et ceux qui tombent sur un début de mesure. */
+function beatGrid(song: Song): BeatGrid {
+  const times = song.beats?.length
+    ? song.beats
+    : song.bars.flatMap((bar, i) => {
+        const length = (barStart(song, i + 1) - bar) / 4;
+        return [0, 1, 2, 3].map((k) => bar + k * length);
+      });
+  const downbeat = times.map((t) => Math.abs(barStart(song, barIndexAt(song, t)) - t) < 1e-4);
+  const firstBarEnd = song.bars[1] ?? Infinity;
+  return {
+    times,
+    downbeat,
+    step: times.length > 1 ? times[1] - times[0] : 0.5,
+    perBar: Math.max(1, times.filter((t) => t < firstBarEnd - 1e-6).length),
+  };
+}
+
+/**
+ * Les `span` mesures qui se suivent et cumulent le plus d'erreurs au dernier passage, en indices
+ * (première et dernière incluses), ou null sans erreur. À égalité, la plus tôt : une seule mesure
+ * fautive est ainsi travaillée avec celle d'avant, qui y mène.
+ */
+export function worstBars(errors: Array<number | null>, span = 2): { first: number; last: number } | null {
+  const width = Math.min(span, errors.length);
+  let best = -1;
+  let bestSum = 0;
+  for (let first = 0; first + width <= errors.length; first++) {
+    let sum = 0;
+    for (let k = 0; k < width; k++) sum += errors[first + k] ?? 0;
+    if (sum > bestSum) {
+      best = first;
+      bestSum = sum;
+    }
+  }
+  return best < 0 ? null : { first: best, last: best + width - 1 };
 }

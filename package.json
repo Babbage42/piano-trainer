@@ -8,13 +8,19 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ios": "npm run build && cap sync ios && mkdir -p ios/App/App/public/pdmx && cp -cR .cache/pdmx/catalog.json .cache/pdmx/mid .cache/pdmx/mxl ios/App/App/public/pdmx/"
   },
   "dependencies": {
+    "@capacitor/core": "7.6.9",
+    "@capacitor/ios": "7.6.9",
     "@tonejs/midi": "2.0.28",
-    "opensheetmusicdisplay": "2.1.3"
+    "opensheetmusicdisplay": "2.1.3",
+    "three": "0.186.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "7.6.9",
+    "@types/three": "0.186.0",
     "typescript": "6.0.3",
     "vite": "8.3.4",
     "vitest": "5.0.3"

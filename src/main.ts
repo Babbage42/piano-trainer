@@ -1,15 +1,17 @@
 import { Sampler } from './audio/sampler';
-import { Player, type Judgement, type Mode, type Scheduler, type Stats } from './engine/player';
+import { Player, worstBars, type Judgement, type Mode, type Scheduler, type Stats } from './engine/player';
 import { autoFingerSong } from './score/auto-fingering';
 import { applyFingerings } from './score/fingerings';
 import { ScoreView } from './score/score-view';
 import { listenComputerKeyboard } from './input/computer-keyboard';
 import { MidiInput, MidiOutScheduler, type MidiState } from './input/midi';
+import { installNativeMidi, nativeMidi, showBluetoothPairing } from './input/native-midi';
 import { DEMOS } from './song/demos';
 import { estimateDifficulty } from './song/difficulty';
 import { songFromMidi } from './song/midi-loader';
 import { barIndexAt, barStart, type Hand, type Song } from './song/types';
 import { addSong, deleteSong, listSongs, loadSettings, saveSettings, type StoredSong } from './storage';
+import type { HandsOverlay } from './ui/ghost-hands';
 import { Renderer } from './ui/renderer';
 import { SearchPanel, escapeHtml, handsBadge, levelBadge, type CatalogPiece } from './ui/search';
 
@@ -25,6 +27,8 @@ const ui = {
   handBtns: [...document.querySelectorAll<HTMLButtonElement>('[data-hand]')],
   restartBtn: $('restart-btn'),
   playBtn: $('play-btn'),
+  metronomeBtn: $<HTMLButtonElement>('metronome-btn'),
+  muteBtn: $<HTMLButtonElement>('mute-btn'),
   barLabel: $('bar-label'),
   speedRange: $<HTMLInputElement>('speed-range'),
   speedLabel: $('speed-label'),
@@ -35,7 +39,8 @@ const ui = {
   loopTo: $<HTMLInputElement>('loop-to'),
   namesCheck: $<HTMLInputElement>('names-check'),
   fingersSelect: $<HTMLSelectElement>('fingers-select'),
-  handsCheck: $<HTMLInputElement>('hands-check'),
+  chordsSelect: $<HTMLSelectElement>('chords-select'),
+  handsSelect: $<HTMLSelectElement>('hands-select'),
   viewSelect: $<HTMLSelectElement>('view-select'),
   stage: $('stage'),
   scorePanel: $('score-panel'),
@@ -43,12 +48,18 @@ const ui = {
   score: $('score'),
   soundSelect: $<HTMLSelectElement>('sound-select'),
   midiStatus: $('midi-status'),
+  menuBtn: $<HTMLButtonElement>('menu-btn'),
   midiHelp: $<HTMLDialogElement>('midi-help'),
   midiHelpBody: $('midi-help-body'),
   timeline: $('timeline'),
   timelineProgress: $('timeline-progress'),
   timelineLoop: $('timeline-loop'),
+  timelineLoopLabel: $('timeline-loop-label'),
+  timelineHeat: $('timeline-heat'),
+  timelineCursor: $('timeline-cursor'),
+  loopErrorsBtn: $<HTMLButtonElement>('loop-errors-btn'),
   canvas: $<HTMLCanvasElement>('canvas'),
+  songCard: $('song-card'),
   songTitle: $('song-title'),
   songInfo: $('song-info'),
   stats: $('stats'),
@@ -69,6 +80,7 @@ const midi = new MidiInput({
 const midiOut = new MidiOutScheduler(() => midi.firstOutput());
 const scheduler: Scheduler = {
   schedule(note, delay, duration) {
+    if (settings.muted) return;
     const usePiano = settings.sound === 'piano' && midi.firstOutput();
     (usePiano ? midiOut : sampler).schedule(note, delay, duration);
   },
@@ -76,15 +88,35 @@ const scheduler: Scheduler = {
     sampler.cancelAll();
     midiOut.cancelAll();
   },
+  // Le métronome sonne toujours sur l'appareil, même quand les notes partent vers le piano.
+  click(delay, accent) {
+    sampler.click(delay, accent);
+  },
 };
 
 const player = new Player(DEMOS[0].load(), scheduler);
 player.setMode(settings.mode);
 player.setUserHands(settings.hands);
 player.setSpeed(settings.speed);
+player.setMetronome(settings.metronome);
 player.onPassEnd = showPassResult;
 
 const renderer = new Renderer(ui.canvas);
+/** Les mains en 3D : three et le modèle ne sont chargés qu'au premier choix de ce mode. */
+let hands3d: Promise<HandsOverlay | null> | null = null;
+async function applyHandsStyle(): Promise<void> {
+  if (settings.handsStyle !== '3d') return renderer.setHandsOverlay(null);
+  hands3d ??= import('./ui/hands3d')
+    .then((m) => m.Hands3DOverlay.create(ui.canvas))
+    .catch((error) => {
+      console.warn('Mains 3D indisponibles, retour aux mains 2D', error);
+      return null;
+    });
+  const overlay = await hands3d;
+  // Le réglage a pu changer pendant le chargement.
+  if (settings.handsStyle === '3d') renderer.setHandsOverlay(overlay);
+}
+void applyHandsStyle();
 /** Touches enfoncées, avec le jugement de leur frappe, pour les colorer. */
 const pressed = new Map<number, Judgement>();
 /** Notes jouées à l'écran ou au clavier d'ordinateur : c'est l'app qui les fait sonner. */
@@ -132,9 +164,11 @@ document.addEventListener('change', (event) => {
   }
 });
 
-// Les navigateurs n'autorisent le son qu'après un geste de l'utilisateur.
-window.addEventListener('pointerdown', () => sampler.start(), { capture: true });
-window.addEventListener('keydown', () => sampler.start(), { capture: true });
+// Les navigateurs n'autorisent le son qu'après un geste de l'utilisateur. Sur iPhone, seuls la
+// fin d'un toucher et le clic comptent : un simple appui (pointerdown) ne débloque rien.
+for (const type of ['pointerdown', 'touchend', 'click', 'keydown']) {
+  window.addEventListener(type, () => sampler.start(), { capture: true });
+}
 
 // --- Morceaux ---------------------------------------------------------------------
 
@@ -180,6 +214,7 @@ function setSong(song: Song, id: string): void {
   ui.songSelect.value = id;
   ui.deleteBtn.hidden = id.startsWith('demo:');
   ui.songTitle.textContent = song.title;
+  showSongCard();
   // Des doigtés tout de suite (calculés) ; ceux de la partition les remplacent dès qu'elle est lue.
   autoFingerSong(song);
   renderSongInfo(song, id);
@@ -190,6 +225,19 @@ function setSong(song: Song, id: string): void {
   ui.loopTo.value = String(Math.min(4, song.bars.length));
   renderControls();
 }
+
+// Sur téléphone couché, le titre seul reste affiché, sur une ligne ; ses détails (niveau, mains,
+// doigtés, source) apparaissent quelques secondes au chargement, puis d'un toucher sur le titre.
+let songCardTimer = 0;
+function showSongCard(): void {
+  ui.songCard.classList.add('open');
+  clearTimeout(songCardTimer);
+  songCardTimer = window.setTimeout(() => ui.songCard.classList.remove('open'), 5000);
+}
+ui.songTitle.addEventListener('click', () => {
+  clearTimeout(songCardTimer);
+  ui.songCard.classList.toggle('open');
+});
 
 const link = (href: string, text: string) => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${text}</a>`;
 
@@ -408,7 +456,56 @@ for (const btn of ui.handBtns) {
   });
 }
 
+// Téléphone couché : la barre ne garde qu'une ligne de commandes ; les autres réglages passent
+// dans un panneau que ☰ ouvre. Ce sont les mêmes éléments, déplacés : leurs écouteurs suivent.
+const compactLayout = matchMedia('(orientation: landscape) and (max-height: 500px)');
+const sheet = $('sheet');
+const sheetBackdrop = $('sheet-backdrop');
+const movable = [...document.querySelectorAll<HTMLElement>('[data-slot]')];
+const homes = new Map(
+  movable.map((element) => {
+    const marker = document.createComment(element.dataset.slot!);
+    element.before(marker);
+    return [element, marker] as const;
+  }),
+);
+function placeControls(): void {
+  for (const element of movable) {
+    if (compactLayout.matches) sheet.querySelector(`[data-slot-target="${element.dataset.slot}"]`)!.append(element);
+    else homes.get(element)!.after(element);
+  }
+  if (!compactLayout.matches) setSheetOpen(false);
+}
+function setSheetOpen(open: boolean): void {
+  sheet.hidden = !open;
+  sheetBackdrop.hidden = !open;
+  ui.menuBtn.setAttribute('aria-expanded', String(open));
+}
+ui.menuBtn.addEventListener('click', () => setSheetOpen(Boolean(sheet.hidden)));
+$('sheet-close').addEventListener('click', () => setSheetOpen(false));
+sheetBackdrop.addEventListener('click', () => setSheetOpen(false));
+compactLayout.addEventListener('change', placeControls);
+placeControls();
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') setSheetOpen(false);
+});
+
 ui.playBtn.addEventListener('click', togglePlay);
+ui.muteBtn.addEventListener('click', () => {
+  settings.muted = !settings.muted;
+  saveSettings(settings);
+  if (settings.muted) scheduler.cancelAll();
+  // Les notes déjà programmées ne repartent qu'à partir de maintenant, sans rattrapage.
+  else player.setSpeed(player.speed);
+  renderControls();
+});
+ui.metronomeBtn.addEventListener('click', () => {
+  sampler.start();
+  settings.metronome = !settings.metronome;
+  player.setMetronome(settings.metronome);
+  saveSettings(settings);
+  renderControls();
+});
 ui.restartBtn.addEventListener('click', () => player.restart());
 ui.speedRange.addEventListener('input', () => setSpeed(Number(ui.speedRange.value)));
 ui.slowerBtn.addEventListener('click', () => setSpeed(player.speed - 0.05));
@@ -422,8 +519,16 @@ ui.namesCheck.addEventListener('change', () => {
   saveSettings(settings);
 });
 
-ui.handsCheck.addEventListener('change', () => {
-  settings.ghostHands = ui.handsCheck.checked;
+ui.handsSelect.addEventListener('change', () => {
+  const value = ui.handsSelect.value;
+  settings.ghostHands = value !== 'none';
+  if (value !== 'none') settings.handsStyle = value as typeof settings.handsStyle;
+  saveSettings(settings);
+  void applyHandsStyle();
+});
+
+ui.chordsSelect.addEventListener('change', () => {
+  settings.chords = ui.chordsSelect.value as typeof settings.chords;
   saveSettings(settings);
 });
 
@@ -447,20 +552,109 @@ ui.soundSelect.addEventListener('change', () => {
   }
 });
 
-// Frise : cliquer ou glisser pour repartir d'une mesure.
-function seekFromTimeline(event: PointerEvent): void {
-  const rect = ui.timeline.getBoundingClientRect();
-  const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-  const bar = barIndexAt(player.song, fraction * player.song.duration);
-  player.startFrom(barStart(player.song, bar));
+// Frise : toucher pour repartir d'une mesure, glisser pour choisir la boucle, tirer un de ses
+// bords pour l'ajuster. Les cases « mes. … à … » suivent, et restent utilisables.
+interface TimelineDrag {
+  pointer: number;
+  mode: 'tap' | 'select' | 'first' | 'last';
+  x: number;
+  /** La mesure touchée au départ. */
+  anchor: number;
 }
+let timelineDrag: TimelineDrag | null = null;
+
+function barAtX(clientX: number): number {
+  const rect = ui.timeline.getBoundingClientRect();
+  const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  return barIndexAt(player.song, Math.min(fraction, 0.9999) * player.song.duration);
+}
+
+/** Le bord de boucle sous le pointeur, s'il y en a un. */
+function loopEdgeAt(event: PointerEvent): 'first' | 'last' | null {
+  if (!player.loop) return null;
+  const rect = ui.timeline.getBoundingClientRect();
+  const x = (t: number) => rect.left + (t / player.song.duration) * rect.width;
+  const tolerance = event.pointerType === 'touch' ? 18 : 8;
+  if (Math.abs(event.clientX - x(player.loop.start)) <= tolerance) return 'first';
+  if (Math.abs(event.clientX - x(player.loop.end)) <= tolerance) return 'last';
+  return null;
+}
+
+/** Boucle sur les mesures first à last (indices depuis 0, dans n'importe quel ordre). */
+function setLoopBars(first: number, last: number): void {
+  const from = String(Math.min(first, last) + 1);
+  const to = String(Math.max(first, last) + 1);
+  if (ui.loopCheck.checked && ui.loopFrom.value === from && ui.loopTo.value === to) return;
+  ui.loopFrom.value = from;
+  ui.loopTo.value = to;
+  ui.loopCheck.checked = true;
+  applyLoop();
+}
+
 ui.timeline.addEventListener('pointerdown', (event) => {
   ui.timeline.setPointerCapture(event.pointerId);
-  seekFromTimeline(event);
+  const edge = loopEdgeAt(event);
+  timelineDrag = { pointer: event.pointerId, mode: edge ?? 'tap', x: event.clientX, anchor: barAtX(event.clientX) };
 });
 ui.timeline.addEventListener('pointermove', (event) => {
-  if (ui.timeline.hasPointerCapture(event.pointerId)) seekFromTimeline(event);
+  const drag = timelineDrag;
+  if (!drag || drag.pointer !== event.pointerId) {
+    ui.timeline.style.cursor = loopEdgeAt(event) ? 'ew-resize' : '';
+    return;
+  }
+  if (drag.mode === 'tap') {
+    if (Math.abs(event.clientX - drag.x) < 6) return;
+    drag.mode = 'select';
+  }
+  const bar = barAtX(event.clientX);
+  const first = Number(ui.loopFrom.value) - 1;
+  const last = Number(ui.loopTo.value) - 1;
+  if (drag.mode === 'select') setLoopBars(drag.anchor, bar);
+  else if (drag.mode === 'first') setLoopBars(Math.min(bar, last), last);
+  else setLoopBars(first, Math.max(bar, first));
 });
+function endTimelineDrag(event: PointerEvent): void {
+  const drag = timelineDrag;
+  if (!drag || drag.pointer !== event.pointerId) return;
+  timelineDrag = null;
+  if (drag.mode === 'tap' && event.type === 'pointerup') player.startFrom(barStart(player.song, drag.anchor));
+}
+ui.timeline.addEventListener('pointerup', endTimelineDrag);
+ui.timeline.addEventListener('pointercancel', endTimelineDrag);
+
+ui.loopErrorsBtn.addEventListener('click', () => {
+  const worst = worstBars(player.errorsByBar);
+  if (!worst) {
+    const played = player.errorsByBar.some((errors) => errors !== null);
+    showToast(
+      played
+        ? 'Aucune erreur à ton dernier passage : bravo !'
+        : "Joue d'abord en mode Attente ou Rythme : l'app note tes erreurs mesure par mesure.",
+    );
+    return;
+  }
+  setLoopBars(worst.first, worst.last);
+  player.restart();
+  showToast(`Boucle sur les mesures ${worst.first + 1} à ${worst.last + 1}, là où tu t'es le plus trompé.`);
+});
+
+/** Les mesures jouées sur la frise : vertes sans faute, de plus en plus rouges avec les erreurs. */
+let heatVersion = -1;
+function renderHeat(): void {
+  if (player.errorsVersion === heatVersion) return;
+  heatVersion = player.errorsVersion;
+  const { song } = player;
+  const at = (t: number) => `${((t / song.duration) * 100).toFixed(3)}%`;
+  const stops: string[] = [];
+  player.errorsByBar.forEach((errors, i) => {
+    if (errors === null) return;
+    const color = errors === 0 ? 'rgba(54, 208, 127, 0.35)' : `rgba(255, 90, 90, ${Math.min(0.9, 0.4 + 0.15 * (errors - 1))})`;
+    const a = at(barStart(song, i));
+    const b = at(barStart(song, i + 1));
+    stops.push(`transparent ${a}`, `${color} ${a}`, `${color} ${b}`, `transparent ${b}`);
+  });
+  ui.timelineHeat.style.background = stops.length ? `linear-gradient(90deg, ${stops.join(', ')})` : '';
+}
 
 // Clavier à l'écran : souris, doigt, plusieurs doigts à la fois.
 const pointerNotes = new Map<number, number>();
@@ -504,22 +698,28 @@ function renderControls(): void {
     btn.setAttribute('aria-pressed', String(player.userHands.has(btn.dataset.hand as Hand)));
     btn.disabled = player.mode === 'listen';
   }
+  ui.metronomeBtn.setAttribute('aria-pressed', String(settings.metronome));
+  ui.muteBtn.setAttribute('aria-pressed', String(settings.muted));
+  ui.muteBtn.textContent = settings.muted ? '🔇' : '🔊';
   ui.speedRange.value = String(player.speed);
   ui.speedLabel.textContent = `${Math.round(player.speed * 100)} %`;
   ui.namesCheck.checked = settings.showNoteNames;
   ui.fingersSelect.value = settings.fingers;
-  ui.handsCheck.checked = settings.ghostHands;
+  ui.chordsSelect.value = settings.chords;
+  ui.handsSelect.value = settings.ghostHands ? settings.handsStyle : 'none';
   ui.viewSelect.value = settings.view;
   ui.soundSelect.value = settings.sound;
 }
 
 function renderMidiState(state: MidiState): void {
   ui.midiStatus.className = `pill ${state.kind === 'connected' ? 'ok' : 'off'}`;
-  ui.midiStatus.textContent =
+  const long =
     state.kind === 'connected' ? `🎹 ${state.names.join(', ')}`
       : state.kind === 'unsupported' ? 'Piano : navigateur non compatible'
         : state.kind === 'denied' ? 'Piano : accès refusé'
           : 'Piano non connecté';
+  // Sur téléphone couché, il ne reste que la pastille : verte quand le piano est là.
+  setHtml(ui.midiStatus, `<span class="long">${escapeHtml(long)}</span><span class="short">● Piano</span>`);
 }
 
 const HELP: Record<MidiState['kind'], string> = {
@@ -541,8 +741,21 @@ const CONNECT_STEPS = `<ol>
   <li>Le nom du piano s'affiche en haut à droite. En mode Attente ou Rythme, joue une note pour démarrer.</li>
 </ol>`;
 
+// Dans l'app iPhone, le piano se connecte depuis l'app elle-même, par l'écran Bluetooth d'Apple.
+const NATIVE_STEPS = `<ol>
+  <li>Allume le piano. Si l'app Roland y est connectée depuis un autre appareil, déconnecte-la :
+    le piano n'accepte qu'une connexion Bluetooth à la fois.</li>
+  <li>Touche « Connecter en Bluetooth », choisis ton piano dans la liste, puis « OK ».</li>
+  <li>La pastille « Piano » passe au vert. En mode Attente ou Rythme, joue une note pour démarrer.</li>
+</ol>
+<p><button id="bluetooth-btn" class="btn primary" type="button">Connecter en Bluetooth</button></p>`;
+
 ui.midiStatus.addEventListener('click', () => {
-  ui.midiHelpBody.innerHTML = HELP[midi.state.kind] || CONNECT_STEPS;
+  ui.midiHelpBody.innerHTML = nativeMidi ? NATIVE_STEPS : HELP[midi.state.kind] || CONNECT_STEPS;
+  ui.midiHelpBody.querySelector('#bluetooth-btn')?.addEventListener('click', () => {
+    ui.midiHelp.close();
+    showBluetoothPairing();
+  });
   ui.midiHelp.showModal();
 });
 
@@ -573,11 +786,14 @@ function renderLive(): void {
   const { song } = player;
   const fraction = (t: number) => `${Math.min(100, Math.max(0, (t / song.duration) * 100))}%`;
   ui.timelineProgress.style.width = fraction(player.time);
+  ui.timelineCursor.style.left = fraction(player.time);
   ui.timelineLoop.hidden = !player.loop;
   if (player.loop) {
     ui.timelineLoop.style.left = fraction(player.loop.start);
     ui.timelineLoop.style.width = `calc(${fraction(player.loop.end)} - ${fraction(player.loop.start)})`;
+    setText(ui.timelineLoopLabel, `${ui.loopFrom.value}–${ui.loopTo.value}`);
   }
+  renderHeat();
   setText(ui.playBtn, player.playing ? '⏸' : '▶');
   setText(ui.barLabel, `Mesure ${barIndexAt(song, Math.max(0, player.time)) + 1} / ${song.bars.length}`);
 
@@ -612,6 +828,7 @@ function frame(now: number): void {
     showNoteNames: settings.showNoteNames,
     fingers: settings.fingers,
     ghostHands: settings.ghostHands,
+    chords: settings.chords,
   });
   if (settings.view !== 'notes') scoreView.update(Math.max(0, player.time));
   renderLive();
@@ -630,6 +847,7 @@ async function init(): Promise<void> {
   renderMidiState(midi.state);
   renderControls();
   requestAnimationFrame(frame);
+  installNativeMidi();
   await midi.connect();
 }
 

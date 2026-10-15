@@ -8,8 +8,10 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <header class="toolbar">
-      <div class="group song">
+    <header id="toolbar" class="toolbar">
+      <button id="menu-btn" class="btn icon menu-btn" title="Réglages" aria-expanded="false" aria-controls="sheet">☰</button>
+
+      <div class="group song" data-slot="song">
         <select id="song-select" aria-label="Morceau"></select>
         <button id="search-btn" class="btn primary" title="Chercher un morceau dans le catalogue">Chercher</button>
         <button id="import-btn" class="btn" title="Ouvrir un ou plusieurs fichiers MIDI (.mid)">Importer…</button>
@@ -23,7 +25,7 @@
         <button class="seg" data-mode="flow" title="Le morceau avance au tempo, tes notes sont jugées">Rythme</button>
       </div>
 
-      <div class="group" role="group" aria-label="Mains jouées par toi">
+      <div class="group hands" role="group" aria-label="Mains jouées par toi" data-slot="hands">
         <button class="seg hand left" data-hand="left" title="Tu joues la main gauche">Main gauche</button>
         <button class="seg hand right" data-hand="right" title="Tu joues la main droite">Main droite</button>
       </div>
@@ -31,7 +33,9 @@
       <div class="group transport">
         <button id="restart-btn" class="btn icon" title="Revenir au début">⏮</button>
         <button id="play-btn" class="btn icon primary" title="Lecture / pause (espace)">▶</button>
-        <span id="bar-label" class="muted"></span>
+        <button id="metronome-btn" class="btn toggle" title="Métronome : un clic à chaque temps, plus fort au début de la mesure, et une mesure de décompte avant de partir"><span class="long">Métronome</span><span class="short" aria-hidden="true">♩</span></button>
+        <button id="mute-btn" class="btn icon toggle" title="Couper le son des notes jouées par l'app (ton piano et le métronome continuent de sonner)">🔊</button>
+        <span id="bar-label" class="muted bar-label"></span>
       </div>
 
       <div class="group speed">
@@ -44,36 +48,67 @@
 
       <div class="group loop">
         <label class="check"><input id="loop-check" type="checkbox" /> Boucle</label>
+        <span id="loop-range" class="loop-range" data-slot="loop">
         <span class="muted">mes.</span>
         <input id="loop-from" type="number" min="1" inputmode="numeric" aria-label="Première mesure" />
         <span class="muted">à</span>
         <input id="loop-to" type="number" min="1" inputmode="numeric" aria-label="Dernière mesure" />
+        <button id="loop-errors-btn" class="btn" title="Boucle sur les deux mesures où tu t'es le plus trompé à ton dernier passage (mode Attente ou Rythme)">Sur mes erreurs</button>
+        </span>
       </div>
 
       <div class="group options">
-        <select id="view-select" aria-label="Affichage">
+        <select id="view-select" aria-label="Affichage" data-slot="display">
           <option value="notes">Notes qui tombent</option>
           <option value="both">Partition + notes</option>
           <option value="score">Partition en grand</option>
         </select>
-        <label class="check"><input id="names-check" type="checkbox" /> Noms des notes</label>
-        <label class="check" title="Des mains posées sur le clavier qui jouent avec les doigtés"><input id="hands-check" type="checkbox" /> Mains</label>
-        <select id="fingers-select" aria-label="Doigtés">
+        <label class="check" data-slot="display"><input id="names-check" type="checkbox" /> Noms des notes</label>
+        <select id="hands-select" data-slot="display" aria-label="Mains" title="Des mains posées sur le clavier qui jouent avec les doigtés">
+          <option value="2d">Mains : 2D</option>
+          <option value="3d">Mains : 3D</option>
+          <option value="none">Sans mains</option>
+        </select>
+        <select id="fingers-select" aria-label="Doigtés" data-slot="display">
           <option value="all">Doigtés : écrits + calculés</option>
           <option value="written">Doigtés : écrits seulement</option>
           <option value="none">Sans doigtés</option>
         </select>
-        <select id="sound-select" aria-label="Son de l'app">
+        <select id="chords-select" aria-label="Accords" title="Les notes à jouer ensemble, reliées par un trait, avec le nom de l'accord quand il est évident" data-slot="display">
+          <option value="names">Accords : repère + nom</option>
+          <option value="marks">Accords : repère seul</option>
+          <option value="none">Accords : masqués</option>
+        </select>
+        <select id="sound-select" aria-label="Son de l'app" data-slot="sound">
           <option value="browser">Son : appareil</option>
           <option value="piano">Son : piano</option>
         </select>
+      </div>
+
+      <div class="group midi-short">
         <button id="midi-status" class="pill" title="Connexion du piano"></button>
       </div>
     </header>
 
-    <div id="timeline" class="timeline" title="Cliquer pour aller à une mesure">
-      <div id="timeline-loop" class="timeline-loop"></div>
+    <!-- Téléphone couché : les réglages secondaires de la barre passent dans ce panneau (src/main.ts). -->
+    <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+    <aside id="sheet" class="sheet" aria-label="Réglages" hidden>
+      <header class="sheet-head">
+        <h2>Réglages</h2>
+        <button id="sheet-close" class="btn icon" title="Fermer">✕</button>
+      </header>
+      <section><h3>Morceau</h3><div class="slot" data-slot-target="song"></div></section>
+      <section><h3>Tu joues</h3><div class="slot" data-slot-target="hands"></div></section>
+      <section><h3>Boucle</h3><div class="slot" data-slot-target="loop"></div></section>
+      <section><h3>Affichage</h3><div class="slot" data-slot-target="display"></div></section>
+      <section><h3>Son des notes de l'app</h3><div class="slot" data-slot-target="sound"></div></section>
+    </aside>
+
+    <div id="timeline" class="timeline" title="Toucher : repartir de cette mesure. Glisser : choisir la boucle. Tirer un bord jaune : l'ajuster.">
+      <div id="timeline-heat" class="timeline-heat"></div>
       <div id="timeline-progress" class="timeline-progress"></div>
+      <div id="timeline-loop" class="timeline-loop"><span id="timeline-loop-label"></span></div>
+      <div id="timeline-cursor" class="timeline-cursor"></div>
     </div>
 
     <main id="stage" class="stage">
@@ -83,8 +118,8 @@
       </section>
       <div class="canvas-wrap">
         <canvas id="canvas"></canvas>
-        <div class="overlay top-left">
-          <div id="song-title" class="title"></div>
+        <div id="song-card" class="overlay top-left song-card">
+          <div id="song-title" class="title" title="Toucher pour voir ou cacher les détails du morceau"></div>
           <div id="song-info" class="muted small song-info"></div>
         </div>
         <div id="stats" class="overlay top-right stats"></div>
@@ -95,7 +130,8 @@
 
     <dialog id="search-dialog" class="search-dialog">
       <form method="dialog" class="search-head">
-        <input id="search-input" type="search" placeholder="Titre, compositeur… (ex. « bach menuet »)" autocomplete="off" />
+        <input id="search-input" type="search" placeholder="Titre, compositeur… (ex. « bach menuet »)" autocomplete="off" enterkeyhint="search" />
+        <div class="search-filters">
         <select id="search-level" aria-label="Niveau">
           <option value="all">Tous niveaux</option>
           <option value="1">Niveau 1</option>
@@ -111,6 +147,7 @@
         <label class="check"><input id="search-beginner" type="checkbox" /> Débutant selon l'auteur</label>
         <label class="check"><input id="search-fingers" type="checkbox" /> Avec doigtés</label>
         <label class="check"><input id="search-separate" type="checkbox" /> Mains séparées seulement</label>
+        </div>
         <button class="btn icon search-close" title="Fermer">✕</button>
       </form>
       <div id="search-count" class="muted small search-count"></div>
