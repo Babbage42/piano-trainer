@@ -56,6 +56,8 @@ export class Renderer {
   private hi = 83;
   private whiteIndex = new Map<number, number>();
   private ghost = new GhostHands();
+  /** Place réservée sous le clavier aux paumes et aux poignets des mains fantômes. */
+  private handZone = 0;
   private whiteCount = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -105,12 +107,13 @@ export class Renderer {
     return this.width / this.whiteCount;
   }
 
+  /** Une touche blanche est environ 6,4 fois plus longue que large : on garde cette proportion. */
   private get keyboardHeight(): number {
-    return Math.max(60, Math.min(this.whiteWidth * 5.5, 190, this.height * 0.3));
+    return Math.max(60, Math.min(this.whiteWidth * 6.2, 230, (this.height - this.handZone) * 0.34));
   }
 
   private get keyboardTop(): number {
-    return this.height - this.keyboardHeight;
+    return this.height - this.handZone - this.keyboardHeight;
   }
 
   private keyRect(pitch: number): { x: number; w: number; black: boolean } | null {
@@ -132,6 +135,10 @@ export class Renderer {
       whiteWidth: this.whiteWidth,
       keyboardTop: this.keyboardTop,
       keyboardHeight: this.keyboardHeight,
+      blackKeyHeight: this.keyboardHeight * 0.62,
+      bottom: this.height,
+      // Le pianiste est assis face au milieu du clavier : la frontière entre mi et fa du milieu.
+      centerX: this.keyRect(65)?.x ?? this.width / 2,
     };
   }
 
@@ -157,12 +164,22 @@ export class Renderer {
   draw(state: RenderState): void {
     if (this.width === 0 || this.height === 0) return;
     const { ctx } = this;
+    // Sous le clavier, environ 4 cm : on aperçoit le dos des mains, coupé comme par le cadre d'une caméra.
+    this.handZone = state.ghostHands ? Math.min(this.height * 0.09, Math.max(20, this.whiteWidth * 1.7)) : 0;
     ctx.fillStyle = COLORS.background;
     ctx.fillRect(0, 0, this.width, this.height);
     this.drawGuides(state.player);
     this.drawNotes(state);
     this.drawKeyboard(state);
-    if (state.ghostHands) this.ghost.draw(this.ctx, this.geometry(), state.player);
+    if (state.ghostHands) {
+      // Le devant du piano, au-dessus duquel passent les mains.
+      const front = this.keyboardTop + this.keyboardHeight;
+      ctx.fillStyle = '#0b0c10';
+      ctx.fillRect(0, front, this.width, this.handZone);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+      ctx.fillRect(0, front, this.width, 2);
+      this.ghost.draw(ctx, this.geometry(), state.player);
+    }
   }
 
   private drawGuides(player: Player): void {

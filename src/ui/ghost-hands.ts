@@ -8,7 +8,15 @@ export interface KeyboardGeometry {
   whiteWidth: number;
   keyboardTop: number;
   keyboardHeight: number;
+  blackKeyHeight: number;
+  /** Bas du dessin : sous le clavier, on aperçoit les poignets. */
+  bottom: number;
+  /** Où se tient le pianiste (le milieu de ses épaules), en x. */
+  centerX: number;
 }
+
+/** Ce que les mains ont besoin de savoir du morceau en cours. */
+export type HandsPlayer = Pick<Player, 'song' | 'time' | 'mode' | 'userHands'>;
 
 /** Une main se prépare à jouer les notes qui arrivent dans ce délai (secondes de morceau). */
 const LOOKAHEAD = 0.35;
@@ -17,40 +25,84 @@ const PREPARE = 2.5;
 const HAND_SPEED = 9;
 const FINGER_SPEED = 16;
 
+/*
+ * Règles tirées de photos de mains d'adultes au piano, vues de dessus :
+ * - les jointures sont au bord avant des touches ; le dos de la main et le poignet sont
+ *   devant le clavier ;
+ * - les doigts sont longs (3 à 3,5 largeurs de touche), effilés, un peu écartés au bout ;
+ *   les longs doigts se posent entre les touches noires, l'auriculaire plus près du bord ;
+ * - le pouce sort du bas de la main, côté index, et part en biais vers l'extérieur, avec
+ *   un creux en V bien ouvert ; il se pose sur le tiers avant de sa touche ;
+ * - la main prolonge l'avant-bras, qui part du coude : près du milieu du clavier, les
+ *   doigts pointent un peu vers le centre ;
+ * - la main est une seule silhouette lisse, contour à l'extérieur seulement, avec de petits
+ *   ongles clairs au bout des doigts.
+ * Mesures en millimètres ; une touche blanche fait 23,5 mm de large.
+ */
+const WHITE_KEY_MM = 23.5;
+/** Profondeur de la jointure du majeur derrière le bord avant des touches blanches. */
+const KNUCKLE_DEPTH = 6;
+/**
+ * La main droite vue de dessus, dans un repère dont l'origine est la jointure du majeur et
+ * dont l'axe y descend vers le poignet. La main gauche en est le miroir.
+ */
+const MCP = [
+  { x: -32, y: 16 }, // pouce : il quitte la main au bord, côté index, un peu sous les jointures
+  { x: -21, y: 3 },
+  { x: 0, y: 0 },
+  { x: 19, y: 3 },
+  { x: 35, y: 10 },
+];
+/** Longueur visible de chaque doigt, de la jointure au bout. */
+const VISIBLE = [0, 72, 80, 74, 58];
+/** Position des articulations le long du doigt (fraction de la longueur visible). */
+const STATIONS = [-0.08, 0.42, 0.75, 1];
+/**
+ * Les deux phalanges du pouce, vues de dessus : à peine plus longues que la distance à sa
+ * touche, pour qu'il reste presque droit, juste un peu fléchi, comme sur les photos.
+ */
+const THUMB_SEGMENTS = [26, 20];
+/** Le bout du pouce se pose sur le tiers avant de sa touche. */
+const THUMB_TIP_DEPTH = 30;
+/** Largeurs (mm) aux articulations : base, milieu, dernière articulation, bout. Pouce : base, articulation, bout. */
+const WIDTHS = [
+  [22, 20.5, 17],
+  [18.5, 17, 15, 13.2],
+  [19, 17.5, 15.5, 13.6],
+  [17.5, 16.2, 14.4, 12.8],
+  [15.5, 14.2, 12.8, 11.4],
+];
+/** Le pianiste est assis au milieu ; ses coudes sont à 26 cm de part et d'autre, 38 cm en arrière des jointures. */
+const ELBOW_HALF = 260;
+const ELBOW_DISTANCE = 380;
+/** Une main ne tourne guère plus d'une quinzaine de degrés. */
+const MAX_TURN = 0.25;
+
 const SKIN = {
-  light: '#f3d0b3',
-  base: '#e4b392',
-  shadow: '#bf8664',
-  crease: 'rgba(125, 70, 45, 0.45)',
-  outline: 'rgba(110, 60, 38, 0.6)',
-  nail: '#f7e1d6',
-  nailEdge: 'rgba(150, 95, 75, 0.55)',
+  base: '#e6b593',
+  outline: '#a8714f',
+  crease: 'rgba(120, 66, 40, 0.35)',
+  nail: '#f3d8cd',
+  nailEdge: 'rgba(160, 105, 85, 0.45)',
 };
+const DARK = (a: number) => `rgba(85, 40, 18, ${a})`;
+const LIGHT = (a: number) => `rgba(255, 244, 235, ${a})`;
 const HAND_COLORS: Record<Hand, string> = { right: '#4c9bff', left: '#ff9a3c' };
 
-/**
- * Proportions de chaque doigt (pouce … auriculaire), en largeurs de touche blanche et en
- * fraction de la hauteur du clavier. Vues de dessus, les jointures forment un arc dont le
- * majeur est le sommet ; le majeur va le plus loin sur les touches, l'auriculaire et le
- * pouce restent près du bord.
- */
-const FINGERS = [
-  { width: 0.82, tipWidth: 0.64, knuckleX: -1.75, knuckleY: 0.99, tipWhite: 0.66, tipBlack: 0.47, rest: 0.74 },
-  { width: 0.62, tipWidth: 0.5, knuckleX: -0.85, knuckleY: 0.865, tipWhite: 0.5, tipBlack: 0.33, rest: 0.58 },
-  { width: 0.64, tipWidth: 0.52, knuckleX: 0, knuckleY: 0.84, tipWhite: 0.46, tipBlack: 0.3, rest: 0.54 },
-  { width: 0.6, tipWidth: 0.48, knuckleX: 0.82, knuckleY: 0.855, tipWhite: 0.49, tipBlack: 0.32, rest: 0.57 },
-  { width: 0.52, tipWidth: 0.42, knuckleX: 1.58, knuckleY: 0.89, tipWhite: 0.56, tipBlack: 0.38, rest: 0.63 },
-];
-
-interface FingerState {
+interface Point {
   x: number;
   y: number;
+}
+
+interface FingerState extends Point {
   pressed: boolean;
   upcoming: boolean;
 }
 
 interface HandState {
   anchor: number | null;
+  /** Rotation de la main (radians), qui suit la direction de l'avant-bras. */
+  turn: number;
   fingers: FingerState[];
 }
 
@@ -65,7 +117,7 @@ export class GhostHands {
   private last = performance.now();
   private songKey: unknown = null;
 
-  draw(ctx: CanvasRenderingContext2D, geo: KeyboardGeometry, player: Player): void {
+  draw(ctx: CanvasRenderingContext2D, geo: KeyboardGeometry, player: HandsPlayer): void {
     const now = performance.now();
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
@@ -73,21 +125,28 @@ export class GhostHands {
       this.songKey = player.song;
       this.hands = { right: emptyHand(), left: emptyHand() };
     }
+    ctx.save();
+    // Les mains restent sur le clavier et la bande sous lui, jamais sur les notes qui tombent.
+    ctx.beginPath();
+    ctx.rect(0, geo.keyboardTop, 1e5, geo.bottom - geo.keyboardTop);
+    ctx.clip();
     for (const hand of ['left', 'right'] as Hand[]) {
       this.update(hand, geo, player, dt);
       const state = this.hands[hand];
       if (state.anchor === null) continue;
       // En mode jeu, la main que joue l'app reste discrète : c'est l'autre qu'on apprend.
       const faded = player.mode !== 'listen' && !player.userHands.has(hand);
-      this.drawHand(ctx, geo, hand, state, faded ? 0.3 : 0.78);
+      this.drawHand(ctx, geo, hand, state, faded ? 0.32 : 0.96);
     }
+    ctx.restore();
   }
 
-  private update(hand: Hand, geo: KeyboardGeometry, player: Player, dt: number): void {
+  private update(hand: Hand, geo: KeyboardGeometry, player: HandsPlayer, dt: number): void {
     const state = this.hands[hand];
     const t = player.time;
     const side = hand === 'right' ? 1 : -1;
     const ww = geo.whiteWidth;
+    const mm = ww / WHITE_KEY_MM;
     const offset = (f: number) => side * (f - 3) * ww;
 
     // Pour chaque doigt, la note qu'il joue maintenant, sinon celle qu'il va jouer bientôt.
@@ -118,27 +177,36 @@ export class GhostHands {
     if (anchors.length > 0) {
       const target = anchors.reduce((a, b) => a + b, 0) / anchors.length;
       // Un grand saut (changement de morceau, retour au début) se fait d'un coup.
-      if (state.anchor === null || Math.abs(target - state.anchor) > ww * 14) state.anchor = target;
-      else state.anchor += (target - state.anchor) * Math.min(1, dt * HAND_SPEED);
+      const jump = state.anchor === null || Math.abs(target - state.anchor) > ww * 14;
+      state.anchor = jump ? target : state.anchor! + (target - state.anchor!) * Math.min(1, dt * HAND_SPEED);
+      // La main prolonge l'avant-bras, qui part du coude du même côté.
+      const elbow = geo.centerX + side * ELBOW_HALF * mm;
+      const turn = Math.max(-MAX_TURN, Math.min(MAX_TURN, Math.atan((state.anchor! - elbow) / (ELBOW_DISTANCE * mm))));
+      state.turn = jump ? turn : state.turn + (turn - state.turn) * Math.min(1, dt * HAND_SPEED);
     }
     if (state.anchor === null) return;
 
-    const top = geo.keyboardTop;
-    const kh = geo.keyboardHeight;
+    const front = geo.keyboardTop + geo.keyboardHeight;
+    const keyLength = geo.keyboardHeight / mm;
+    const blackFront = (geo.keyboardHeight - geo.blackKeyHeight) / mm;
     state.fingers.forEach((finger, i) => {
       const note = assigned[i];
       const key = note && geo.keyCenter(note.pitch);
       const pressed = !!note && note.start <= t && t < note.start + note.duration * 0.92;
+      // Profondeur du bout du doigt derrière le bord avant des touches blanches (mm).
+      const natural = i === 0 ? THUMB_TIP_DEPTH : KNUCKLE_DEPTH - MCP[i].y + VISIBLE[i];
+      let depth = natural;
       let tx: number;
-      let ty: number;
-      const spec = FINGERS[i];
       if (key) {
         tx = key.x;
-        ty = top + kh * (key.black ? spec.tipBlack : spec.tipWhite) + (pressed ? kh * 0.025 : 0);
+        // Sur une touche noire, le doigt doit être sur la touche, un peu derrière son bord avant.
+        if (key.black) depth = i === 0 ? blackFront + 6 : Math.max(natural, blackFront + 10);
+        depth = Math.min(depth, keyLength - 8);
+        if (pressed) depth -= 1.5;
       } else {
-        tx = state.anchor! + offset(i + 1);
-        ty = top + kh * spec.rest;
+        tx = state.anchor! + side * (i - 2) * ww;
       }
+      const ty = front - depth * mm;
       if (finger.x === 0 && finger.y === 0) {
         finger.x = tx;
         finger.y = ty;
@@ -151,205 +219,315 @@ export class GhostHands {
     });
   }
 
+  /** Le calque où chaque main est dessinée d'un bloc avant d'être posée sur le clavier. */
+  private layer: HTMLCanvasElement | null = null;
+
+  private layerFor(ctx: CanvasRenderingContext2D): CanvasRenderingContext2D {
+    const main = ctx.canvas;
+    this.layer ??= document.createElement('canvas');
+    if (this.layer.width !== main.width || this.layer.height !== main.height) {
+      this.layer.width = main.width;
+      this.layer.height = main.height;
+    }
+    const layer = this.layer.getContext('2d')!;
+    layer.setTransform(1, 0, 0, 1, 0, 0);
+    layer.clearRect(0, 0, main.width, main.height);
+    layer.setTransform(ctx.getTransform());
+    return layer;
+  }
+
   private drawHand(ctx: CanvasRenderingContext2D, geo: KeyboardGeometry, hand: Hand, state: HandState, alpha: number): void {
     const side = hand === 'right' ? 1 : -1;
-    const ww = geo.whiteWidth;
-    const top = geo.keyboardTop;
-    const kh = geo.keyboardHeight;
-    const anchor = state.anchor!;
-    const at = (x: number, y: number) => ({ x: anchor + side * x * ww, y: top + y * kh });
-    const knuckle = (i: number) => at(FINGERS[i].knuckleX, FINGERS[i].knuckleY);
-
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    // Une ombre portée : la main flotte un peu au-dessus des touches.
-    const shadow = (pressed = false) => {
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.32)';
-      ctx.shadowBlur = ww * (pressed ? 0.25 : 0.55);
-      ctx.shadowOffsetY = ww * (pressed ? 0.05 : 0.18);
-    };
-    const noShadow = () => {
-      ctx.shadowColor = 'transparent';
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetY = 0;
+    const mm = geo.whiteWidth / WHITE_KEY_MM;
+    const origin = { x: state.anchor!, y: geo.keyboardTop + geo.keyboardHeight - KNUCKLE_DEPTH * mm };
+    const cos = Math.cos(state.turn);
+    const sin = Math.sin(state.turn);
+    /** Un point du repère de la main (mm) vers l'écran, avec la rotation de la main. */
+    const P = (x: number, y: number): Point => {
+      const dx = side * x * mm;
+      const dy = y * mm;
+      return { x: origin.x + dx * cos - dy * sin, y: origin.y + dx * sin + dy * cos };
     };
 
-    // Le pouce : il part du bas de la paume, en biais, en deux segments.
+    // Les formes : le pouce (articulé), les quatre doigts, la paume et le poignet.
     const thumb = state.fingers[0];
-    const thumbRoot = at(-1.35, 1.35);
-    const thumbJoint = knuckle(0);
-    shadow(thumb.pressed);
-    this.fillSegment(ctx, thumbRoot, thumbJoint, ww * 1.05, ww * 0.86, false);
-    const thumbTip = this.fillSegment(ctx, thumbJoint, thumb, ww * FINGERS[0].width, ww * FINGERS[0].tipWidth, true);
-
-    // La paume, avec l'arc des jointures et le creux entre pouce et index.
-    const k1 = knuckle(1);
-    const k2 = knuckle(2);
-    const k3 = knuckle(3);
-    const k4 = knuckle(4);
-    const palm = ctx.createLinearGradient(0, top + kh * 0.8, 0, top + kh * 1.4);
-    palm.addColorStop(0, SKIN.base);
-    palm.addColorStop(1, SKIN.shadow);
-    ctx.fillStyle = palm;
-    ctx.strokeStyle = SKIN.outline;
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    const start = at(2.2, 1.6);
-    ctx.moveTo(start.x, start.y);
-    const pinkySide = at(2.05, 0.95);
-    ctx.lineTo(pinkySide.x, pinkySide.y);
-    ctx.quadraticCurveTo(k4.x + side * ww * 0.35, k4.y - kh * 0.03, k4.x, k4.y - kh * 0.02);
-    ctx.quadraticCurveTo(k3.x + side * ww * 0.4, k3.y - kh * 0.035, k3.x, k3.y - kh * 0.03);
-    ctx.quadraticCurveTo(k2.x + side * ww * 0.4, k2.y - kh * 0.04, k2.x, k2.y - kh * 0.035);
-    ctx.quadraticCurveTo(k1.x + side * ww * 0.4, k1.y - kh * 0.035, k1.x - side * ww * 0.25, k1.y - kh * 0.02);
-    const web = at(-1.5, 0.93);
-    ctx.quadraticCurveTo(at(-1.3, 0.88).x, at(-1.3, 0.88).y, web.x, web.y);
-    const thumbBase = at(-1.95, 1.6);
-    ctx.quadraticCurveTo(at(-1.75, 1.15).x, at(-1.75, 1.15).y, thumbBase.x, thumbBase.y);
-    ctx.closePath();
-    shadow();
-    ctx.fill();
-    noShadow();
-    ctx.stroke();
-
-    // Les doigts, de l'auriculaire à l'index (l'index passe au-dessus du pouce).
-    const tips: Array<{ x: number; y: number }> = [thumbTip];
-    for (const i of [4, 3, 2, 1]) {
-      const finger = state.fingers[i];
-      shadow(finger.pressed);
-      tips[i] = this.fillSegment(ctx, knuckle(i), finger, ww * FINGERS[i].width, ww * FINGERS[i].tipWidth, true);
+    const thumbPoints = this.thumbStations(P(MCP[0].x, MCP[0].y), thumb, side, mm);
+    const fingerPoints: Point[][] = [thumbPoints];
+    for (const i of [1, 2, 3, 4]) {
+      const mcp = P(MCP[i].x, MCP[i].y);
+      const tip = state.fingers[i];
+      fingerPoints[i] = STATIONS.map((f) => ({ x: mcp.x + (tip.x - mcp.x) * f, y: mcp.y + (tip.y - mcp.y) * f }));
     }
-    noShadow();
+    const widths = WIDTHS.map((w) => w.map((v) => v * mm));
+    const fingerPath = (i: number) => limbPath(fingerPoints[i], widths[i]);
+    const palm = palmPath(P, (geo.bottom - origin.y) / mm + 60);
 
-    // Détails : plis, ongles, halos et numéros.
-    for (const i of [0, 4, 3, 2, 1]) {
-      const finger = state.fingers[i];
-      const base = i === 0 ? thumbJoint : knuckle(i);
-      this.drawDetails(ctx, base, tips[i], finger, ww * FINGERS[i].tipWidth, hand, i + 1, i === 0 ? side : 0);
+    const L = this.layerFor(ctx);
+    L.lineJoin = 'round';
+    L.lineCap = 'round';
+    // 1. La silhouette d'un seul bloc : contour de toutes les formes, puis leur remplissage
+    //    par-dessus, si bien que le contour ne reste qu'à l'extérieur de la main.
+    const order = [0, 4, 3, 2, 1];
+    L.strokeStyle = SKIN.outline;
+    L.lineWidth = Math.max(1.5, 1.1 * mm);
+    for (const i of order) L.stroke(fingerPath(i));
+    L.stroke(palm);
+    L.fillStyle = SKIN.base;
+    for (const i of order) L.fill(fingerPath(i));
+    // Les doigts se séparent par un trait léger là où ils se touchent.
+    L.strokeStyle = DARK(0.32);
+    L.lineWidth = Math.max(0.8, 0.45 * mm);
+    for (const i of order) L.stroke(fingerPath(i));
+    // Le dos de la main recouvre la base des doigts et du pouce.
+    L.fill(palm);
+
+    // 2. Le modelé, posé seulement sur la main (source-atop).
+    L.globalCompositeOperation = 'source-atop';
+    const tipLine = P(0, -78);
+    const wristLine = P(0, 95);
+    const along = L.createLinearGradient(tipLine.x, tipLine.y, wristLine.x, wristLine.y);
+    along.addColorStop(0, DARK(0.2)); // le bout des doigts plonge vers les touches
+    along.addColorStop(0.32, LIGHT(0.05));
+    along.addColorStop(0.45, LIGHT(0.16)); // les jointures, le plus haut de la main
+    along.addColorStop(0.7, LIGHT(0));
+    along.addColorStop(1, DARK(0.25)); // le poignet qui redescend
+    L.fillStyle = along;
+    L.fillRect(-1e4, -1e4, 2e4, 2e4);
+    const radial = P(-46, 30);
+    const ulnar = P(44, 30);
+    const across = L.createLinearGradient(radial.x, radial.y, ulnar.x, ulnar.y);
+    across.addColorStop(0, DARK(0.14));
+    across.addColorStop(0.3, LIGHT(0.06));
+    across.addColorStop(0.6, LIGHT(0));
+    across.addColorStop(1, DARK(0.24)); // le bord de l'auriculaire, dans l'ombre
+    L.fillStyle = across;
+    L.fillRect(-1e4, -1e4, 2e4, 2e4);
+    // Une arête claire le long de chaque doigt : il est rond.
+    L.strokeStyle = LIGHT(0.16);
+    for (const i of order) {
+      const pts = fingerPoints[i];
+      L.lineWidth = widths[i][1] * 0.32;
+      L.beginPath();
+      const a = pts[i === 0 ? 0 : 1];
+      const b = pts[pts.length - 2];
+      L.moveTo(a.x, a.y);
+      L.lineTo(b.x, b.y);
+      L.stroke();
     }
+    // Les bosses des jointures et le creux entre pouce et index.
+    for (const i of [1, 2, 3, 4]) {
+      const k = P(MCP[i].x, MCP[i].y - 2);
+      const r = widths[i][0] * 0.5;
+      const glow = L.createRadialGradient(k.x, k.y, 0, k.x, k.y, r);
+      glow.addColorStop(0, LIGHT(0.22));
+      glow.addColorStop(1, LIGHT(0));
+      L.fillStyle = glow;
+      L.fillRect(k.x - r, k.y - r, 2 * r, 2 * r);
+    }
+    const web = P(-30, 18);
+    const webShade = L.createRadialGradient(web.x, web.y, 0, web.x, web.y, 12 * mm);
+    webShade.addColorStop(0, DARK(0.16));
+    webShade.addColorStop(1, DARK(0));
+    L.fillStyle = webShade;
+    L.fillRect(web.x - 12 * mm, web.y - 12 * mm, 24 * mm, 24 * mm);
+
+    // 3. Les détails : plis des articulations et ongles.
+    L.globalCompositeOperation = 'source-over';
+    for (const i of order) this.drawFingerDetails(L, fingerPoints[i], widths[i], i === 0);
+
+    // 4. La main sur le clavier, avec son ombre portée.
+    const dpr = ctx.getTransform().a || 1;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = alpha;
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+    ctx.shadowBlur = 8 * mm * dpr;
+    ctx.shadowOffsetY = 3 * mm * dpr;
+    ctx.drawImage(this.layer!, 0, 0);
     ctx.restore();
+
+    // 5. Les halos et les numéros, nets, par-dessus.
+    for (const i of order) this.drawMarks(ctx, fingerPoints[i], widths[i], state.fingers[i], hand, i + 1, alpha);
   }
 
   /**
-   * Un segment de doigt effilé, de `base` (largeur wb) à `tip` (largeur wt), arrondi au
-   * bout s'il s'agit d'une phalange terminale. Ombré en travers pour lui donner du volume.
-   * Renvoie le point où s'arrête le bout du doigt.
+   * Le pouce, comme une articulation à deux segments de longueur fixe : son articulation se
+   * place là où les deux phalanges se rejoignent, du côté extérieur de la main.
    */
-  private fillSegment(
-    ctx: CanvasRenderingContext2D,
-    base: { x: number; y: number },
-    target: { x: number; y: number; pressed?: boolean },
-    wb: number,
-    wt: number,
-    rounded: boolean,
-  ): { x: number; y: number } {
-    const dx = target.x - base.x;
-    const dy = target.y - base.y;
-    const length = Math.hypot(dx, dy) || 1;
-    const u = { x: dx / length, y: dy / length };
-    const n = { x: -u.y, y: u.x };
-    // Le bout du doigt s'arrête un peu avant le point visé, pour que la pulpe soit sur la touche.
-    const tipWidth = target.pressed ? wt * 1.08 : wt;
-    const tip = rounded ? { x: target.x - u.x * tipWidth * 0.3, y: target.y - u.y * tipWidth * 0.3 } : target;
-    const gradient = ctx.createLinearGradient(base.x + (n.x * wb) / 2, base.y + (n.y * wb) / 2, base.x - (n.x * wb) / 2, base.y - (n.y * wb) / 2);
-    gradient.addColorStop(0, SKIN.shadow);
-    gradient.addColorStop(0.38, target.pressed ? SKIN.shadow : SKIN.base);
-    gradient.addColorStop(0.62, SKIN.light);
-    gradient.addColorStop(1, SKIN.shadow);
-    ctx.fillStyle = gradient;
-    ctx.strokeStyle = SKIN.outline;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(base.x + (n.x * wb) / 2, base.y + (n.y * wb) / 2);
-    ctx.lineTo(tip.x + (n.x * tipWidth) / 2, tip.y + (n.y * tipWidth) / 2);
-    if (rounded) {
-      const angle = Math.atan2(n.y, n.x);
-      ctx.arc(tip.x, tip.y, tipWidth / 2, angle, angle + Math.PI, true);
+  private thumbStations(base: Point, tip: Point, side: number, mm: number): Point[] {
+    const a = THUMB_SEGMENTS[0] * mm;
+    const b = THUMB_SEGMENTS[1] * mm;
+    const d = Math.hypot(tip.x - base.x, tip.y - base.y) || 1;
+    const u = { x: (tip.x - base.x) / d, y: (tip.y - base.y) / d };
+    let joint: Point;
+    if (d >= a + b) {
+      joint = { x: base.x + u.x * d * (a / (a + b)), y: base.y + u.y * d * (a / (a + b)) };
     } else {
-      ctx.lineTo(tip.x - (n.x * tipWidth) / 2, tip.y - (n.y * tipWidth) / 2);
+      const angle = Math.acos(Math.max(-1, Math.min(1, (a * a + d * d - b * b) / (2 * a * d))));
+      const turn = (s: number) => {
+        const c = Math.cos(s * angle);
+        const n = Math.sin(s * angle);
+        return { x: base.x + (u.x * c - u.y * n) * a, y: base.y + (u.x * n + u.y * c) * a };
+      };
+      const one = turn(1);
+      const other = turn(-1);
+      // Du côté extérieur : à gauche pour la main droite, à droite pour la gauche.
+      joint = side * one.x < side * other.x ? one : other;
     }
-    ctx.lineTo(base.x - (n.x * wb) / 2, base.y - (n.y * wb) / 2);
-    ctx.closePath();
-    ctx.fill();
-    const saved = ctx.shadowColor;
-    ctx.shadowColor = 'transparent';
-    ctx.stroke();
-    ctx.shadowColor = saved;
-    return tip;
+    return [base, joint, { x: tip.x, y: tip.y }];
   }
 
-  private drawDetails(
+  /** Plis de la peau sur les articulations, et l'ongle, petit et clair, au bout du doigt. */
+  private drawFingerDetails(L: CanvasRenderingContext2D, pts: Point[], widths: number[], thumb: boolean): void {
+    const n = pts.length;
+    const tip = pts[n - 1];
+    const tipWidth = widths[n - 1];
+    const crease = (at: Point, dir: Point, width: number, shift: number) => {
+      const nrm = { x: -dir.y, y: dir.x };
+      const c = { x: at.x + dir.x * shift, y: at.y + dir.y * shift };
+      L.beginPath();
+      L.moveTo(c.x + nrm.x * width * 0.24, c.y + nrm.y * width * 0.24);
+      L.quadraticCurveTo(c.x - dir.x * width * 0.08, c.y - dir.y * width * 0.08, c.x - nrm.x * width * 0.24, c.y - nrm.y * width * 0.24);
+      L.stroke();
+    };
+    L.strokeStyle = SKIN.crease;
+    L.lineWidth = 0.8;
+    if (thumb) {
+      crease(pts[1], unit(pts[0], pts[2]), widths[1], 0);
+    } else {
+      const dir = unit(pts[0], tip);
+      for (const shift of [-0.1, 0.06]) crease(pts[1], dir, widths[1], shift * widths[1]);
+      crease(pts[2], dir, widths[2], 0);
+    }
+    // L'ongle : un ovale clair, dans l'axe du doigt, un peu en retrait du bout.
+    const dir = unit(pts[n - 2], tip);
+    const length = tipWidth * (thumb ? 0.62 : 0.5);
+    const width = tipWidth * (thumb ? 0.6 : 0.6);
+    const back = tipWidth * 0.1 + length / 2;
+    L.save();
+    L.translate(tip.x - dir.x * back, tip.y - dir.y * back);
+    L.rotate(Math.atan2(dir.y, dir.x));
+    L.beginPath();
+    L.ellipse(0, 0, length / 2, width / 2, 0, 0, Math.PI * 2);
+    const nail = L.createLinearGradient(-length / 2, 0, length / 2, 0);
+    nail.addColorStop(0, '#ecc6b9');
+    nail.addColorStop(0.6, SKIN.nail);
+    nail.addColorStop(1, '#faefea');
+    L.fillStyle = nail;
+    L.fill();
+    L.strokeStyle = SKIN.nailEdge;
+    L.lineWidth = 0.7;
+    L.stroke();
+    L.restore();
+  }
+
+  /** Le halo du doigt qui joue ou va jouer, et le numéro du doigt. */
+  private drawMarks(
     ctx: CanvasRenderingContext2D,
-    base: { x: number; y: number },
-    tip: { x: number; y: number },
+    pts: Point[],
+    widths: number[],
     finger: FingerState,
-    width: number,
     hand: Hand,
     number: number,
-    /** Pour le pouce, vu de côté : de quel côté décaler l'ongle (0 pour les autres doigts). */
-    thumbSide: number,
+    alpha: number,
   ): void {
-    const dx = tip.x - base.x;
-    const dy = tip.y - base.y;
-    const length = Math.hypot(dx, dy) || 1;
-    const u = { x: dx / length, y: dy / length };
-    const n = { x: -u.y, y: u.x };
-
-    // Plis aux articulations (un seul pour le pouce, deux pour les autres doigts).
-    ctx.strokeStyle = SKIN.crease;
-    ctx.lineWidth = 1;
-    for (const at of thumbSide ? [0.5] : [0.45, 0.74]) {
-      const c = { x: base.x + dx * at, y: base.y + dy * at };
-      const half = width * 0.38;
-      ctx.beginPath();
-      ctx.moveTo(c.x + n.x * half, c.y + n.y * half);
-      ctx.quadraticCurveTo(c.x - u.x * width * 0.12, c.y - u.y * width * 0.12, c.x - n.x * half, c.y - n.y * half);
-      ctx.stroke();
-    }
-
-    // L'ongle. Celui du pouce, vu de biais, est décalé sur le côté et plus étroit.
+    const n = pts.length;
+    const tip = pts[n - 1];
+    const tipWidth = widths[n - 1];
+    const dir = unit(pts[n - 2], tip);
     ctx.save();
-    const nailCenter = {
-      x: tip.x - u.x * width * 0.08 + n.x * width * 0.12 * thumbSide,
-      y: tip.y - u.y * width * 0.08 + n.y * width * 0.12 * thumbSide,
-    };
-    ctx.translate(nailCenter.x, nailCenter.y);
-    ctx.rotate(Math.atan2(u.y, u.x));
-    ctx.fillStyle = SKIN.nail;
-    ctx.strokeStyle = SKIN.nailEdge;
-    ctx.lineWidth = 0.8;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, width * 0.3, width * (thumbSide ? 0.26 : 0.32), 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-
-    // Le doigt qui joue ou va jouer est entouré de la couleur de sa main.
+    ctx.globalAlpha = alpha;
     if (finger.pressed || finger.upcoming) {
-      const pulse = finger.pressed ? 1 : 0.5 + 0.5 * Math.sin(performance.now() / 120);
-      ctx.save();
-      ctx.globalAlpha *= pulse;
+      const pulse = finger.pressed ? 1 : 0.25 + 0.3 * Math.sin(performance.now() / 120);
+      const pad = { x: tip.x - dir.x * tipWidth * 0.45, y: tip.y - dir.y * tipWidth * 0.45 };
+      ctx.globalAlpha = alpha * pulse;
       ctx.strokeStyle = HAND_COLORS[hand];
-      ctx.lineWidth = finger.pressed ? 3 : 2;
+      ctx.lineWidth = finger.pressed ? 2.5 : 1.2;
       ctx.beginPath();
-      ctx.arc(tip.x, tip.y, width * 0.78, 0, Math.PI * 2);
+      ctx.arc(pad.x, pad.y, tipWidth * (finger.pressed ? 0.62 : 0.55), 0, Math.PI * 2);
       ctx.stroke();
-      ctx.restore();
+      ctx.globalAlpha = alpha;
     }
-
-    // Le numéro du doigt, sur la première phalange : le même que dans les pastilles.
-    if (width >= 7) {
-      ctx.fillStyle = 'rgba(80, 40, 22, 0.85)';
-      ctx.font = `700 ${Math.round(Math.min(12, width * 0.95))}px system-ui, sans-serif`;
+    if (widths[0] >= 9) {
+      const at = number === 1 ? pts[1] : { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      ctx.fillStyle = 'rgba(85, 42, 22, 0.65)';
+      ctx.font = `700 ${Math.round(Math.min(12, widths[0] * 0.5))}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(number), base.x + dx * 0.24, base.y + dy * 0.24);
+      ctx.fillText(String(number), at.x, at.y);
     }
+    ctx.restore();
   }
 }
 
+/** Un doigt effilé passant par `pts`, de largeur `widths`, arrondi au bout, au contour lisse. */
+function limbPath(pts: Point[], widths: number[]): Path2D {
+  const n = pts.length;
+  const tipRadius = widths[n - 1] / 2;
+  const last = unit(pts[n - 2], pts[n - 1]);
+  // Le centre du bout arrondi est en retrait d'un rayon : la pulpe touche le point visé.
+  const p = pts.map((q, k) => (k === n - 1 ? { x: q.x - last.x * tipRadius, y: q.y - last.y * tipRadius } : q));
+  const normals = p.map((_, k) => {
+    const d = unit(p[Math.max(0, k - 1)], p[Math.min(n - 1, k + 1)]);
+    return { x: -d.y, y: d.x };
+  });
+  const left = p.map((q, k) => ({ x: q.x + (normals[k].x * widths[k]) / 2, y: q.y + (normals[k].y * widths[k]) / 2 }));
+  const right = p.map((q, k) => ({ x: q.x - (normals[k].x * widths[k]) / 2, y: q.y - (normals[k].y * widths[k]) / 2 }));
+  const path = new Path2D();
+  path.moveTo(left[0].x, left[0].y);
+  for (let k = 1; k < n - 1; k++) {
+    path.quadraticCurveTo(left[k].x, left[k].y, (left[k].x + left[k + 1].x) / 2, (left[k].y + left[k + 1].y) / 2);
+  }
+  path.lineTo(left[n - 1].x, left[n - 1].y);
+  const angle = Math.atan2(normals[n - 1].y, normals[n - 1].x);
+  path.arc(p[n - 1].x, p[n - 1].y, tipRadius, angle, angle + Math.PI, true);
+  for (let k = n - 2; k >= 1; k--) {
+    path.quadraticCurveTo(right[k].x, right[k].y, (right[k].x + right[k - 1].x) / 2, (right[k].y + right[k - 1].y) / 2);
+  }
+  path.lineTo(right[0].x, right[0].y);
+  path.closePath();
+  return path;
+}
+
+/** Le dos de la main et le poignet, qui continuent sous le bord du dessin. */
+function palmPath(P: (x: number, y: number) => Point, below: number): Path2D {
+  const steps: Array<['M' | 'L', number, number] | ['Q', number, number, number, number]> = [
+    ['M', 30, below],
+    ['L', 24, 80], // le poignet, côté auriculaire
+    ['Q', 37, 52, 39, 26], // le bord de la main
+    ['Q', 41, 12, 35, 5], // la jointure de l'auriculaire
+    ['Q', 28, -3, 19, -4], // l'arc des jointures
+    ['Q', 10, -8, 0, -7],
+    ['Q', -10, -8, -21, -4],
+    ['Q', -29, -1, -30, 8], // le bord de l'index
+    ['Q', -30, 12, -36, 18], // le creux entre index et pouce
+    ['Q', -44, 34, -38, 56], // le gras du pouce
+    ['Q', -32, 70, -27, 80], // le poignet, côté pouce
+    ['L', -32, below],
+  ];
+  const path = new Path2D();
+  for (const step of steps) {
+    if (step[0] === 'Q') {
+      const c = P(step[1], step[2]);
+      const q = P(step[3], step[4]);
+      path.quadraticCurveTo(c.x, c.y, q.x, q.y);
+    } else {
+      const q = P(step[1], step[2]);
+      if (step[0] === 'M') path.moveTo(q.x, q.y);
+      else path.lineTo(q.x, q.y);
+    }
+  }
+  path.closePath();
+  return path;
+}
+
+function unit(a: Point, b: Point): Point {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = Math.hypot(dx, dy) || 1;
+  return { x: dx / length, y: dy / length };
+}
+
 function emptyHand(): HandState {
-  return { anchor: null, fingers: Array.from({ length: 5 }, () => ({ x: 0, y: 0, pressed: false, upcoming: false })) };
+  return { anchor: null, turn: 0, fingers: Array.from({ length: 5 }, () => ({ x: 0, y: 0, pressed: false, upcoming: false })) };
 }
